@@ -104,7 +104,8 @@ jobs:
         with:
           name: native-build-x64
           path: build/Release/
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: nuget-cache
         with:
           path: ~/.nuget/packages
           key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
@@ -117,6 +118,11 @@ jobs:
           Copy-Item build/Release/7z.dll artifacts/app/
           Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.nuget-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: ~/.nuget/packages
+          key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
       - name: WinUI and notification area automation
         shell: pwsh
         run: |

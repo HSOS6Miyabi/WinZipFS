@@ -302,21 +302,27 @@ class Dashboard {
     void build() {
         window.Title(L"WinZipFS");
         try {window.SystemBackdrop(MicaBackdrop());}catch(...){}
+        Grid layout;
+        RowDefinition fixedRow;fixedRow.Height(GridLength{1,GridUnitType::Auto});
+        RowDefinition scrollRow;scrollRow.Height(GridLength{1,GridUnitType::Star});
+        layout.RowDefinitions().Append(fixedRow);layout.RowDefinitions().Append(scrollRow);
+        auto header=vertical(10);
+        header.Padding(Thickness{28,22,28,12});header.MaxWidth(960);
         auto page=vertical(16);
-        page.Padding(Thickness{28,22,28,28});page.MaxWidth(960);
-        page.Children().Append(text(L"Archive drives",32,true));
-        page.Children().Append(text(L"Mount compressed files as Windows drives, edit files in place, and save changes when you are ready."));
+        page.Padding(Thickness{28,4,28,28});page.MaxWidth(960);
+        header.Children().Append(text(L"Archive drives",32,true));
+        header.Children().Append(text(L"Mount compressed files as Windows drives, edit files in place, and save changes when you are ready."));
         auto toolbar=horizontal();
         mountBtn=button(L"Mount archive…",L"Mount");
         hideBtn=button(L"Minimize to tray",L"Hide");
         exitBtn=button(L"Exit",L"Exit");
         toolbar.Children().Append(mountBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
-        page.Children().Append(toolbar);
+        header.Children().Append(toolbar);
         auto activity=horizontal();
         progress=identify(ProgressRing{},L"Progress");progress.Width(20);progress.Height(20);progress.IsActive(false);
         AutomationProperties::SetName(progress,L"Archive operation progress");
         message=identify(text(L"Ready"),L"Status");
-        activity.Children().Append(progress);activity.Children().Append(message);page.Children().Append(activity);
+        activity.Children().Append(progress);activity.Children().Append(message);header.Children().Append(activity);
         auto volumes=vertical();
         volumes.Children().Append(text(L"Mounted archives",20,true));
         summary=identify(text(L"0 mounted"),L"Summary");volumes.Children().Append(summary);
@@ -358,7 +364,9 @@ class Dashboard {
         recoveryBtn=button(L"Open recovery cache",L"Recovery");integrations.Children().Append(recoveryBtn);
         page.Children().Append(card(integrations));
         auto scroll=identify(ScrollViewer{},L"DashboardScroll");scroll.Content(page);scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);window.Content(scroll);
+        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+        Grid::SetRow(header,0);layout.Children().Append(header);
+        Grid::SetRow(scroll,1);layout.Children().Append(scroll);window.Content(layout);
         mountBtn.Click([this](auto&&,auto&&){browse();});
         hideBtn.Click([this](auto&&,auto&&){hide();});
         exitBtn.Click([this](auto&&,auto&&){quit();});
