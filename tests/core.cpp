@@ -249,6 +249,53 @@ void idle(fs::path const& archive) {
     drive=mount(archive,o);require(read(fs::path(drive+L"\\")/L"auto.txt")=="auto","auto commit survived");
     eject(drive);
 }
+void uncMode(fs::path const& fixtures) {
+    std::wcout<<L"Testing UNC on-demand namespace"<<std::endl;
+    auto first=fixtures/L"unc first.zip",second=fixtures/L"unc second.7z";
+    fs::copy_file(fixtures/L"ui.zip",first,fs::copy_options::overwrite_existing);
+    fs::copy_file(fixtures/L"tray.7z",second,fs::copy_options::overwrite_existing);
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    DWORD drives=GetLogicalDrives();
+    require(wz_unc_start(&o,2)==1,"start UNC namespace");
+    wchar_t root[32768]{},a[32768]{},b[32768]{},cab[32768]{};
+    require(wz_unc_root(root,32768)==1,"get UNC root");
+    require(wz_unc_path(first.c_str(),a,32768)==1&&wz_unc_path(second.c_str(),b,32768)==1,"generate UNC addresses");
+    require(wz_unc_path((fixtures/L"readonly.cab").c_str(),cab,32768)==1,"generate readonly UNC");
+    require(wz_count()==0&&GetLogicalDrives()==drives,"no eager archive session or drive letter");
+    require(std::wstring_view(a).starts_with(L"\\\\WinZipFS\\"),"UNC address");
+    auto aa=fs::path(a),bb=fs::path(b);
+    require(read(aa/L"sample.txt")=="original","direct UNC read creates a session");
+    require(volume(a).uncMode&&wz_count()==1,"first lazy session");
+    require(read(bb/L"sample.txt")=="original","second direct UNC read");
+    require(wz_count()==2&&GetLogicalDrives()==drives,"concurrent UNC archives no drive letters");
+    auto before=read(first);
+    write(aa/L"edited.txt","UNC batch");
+    fs::create_directory(aa/L"folder");
+    write(aa/L"folder"/L"temporary.txt","rename");
+    fs::rename(aa/L"folder"/L"temporary.txt",aa/L"renamed.txt");
+    fs::remove(aa/L"folder");
+    require(read(aa/L"renamed.txt")=="rename","UNC rename");
+    require(read(first)==before,"batch deferred");
+    HANDLE held=CreateFileW((aa/L"edited.txt").c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                           nullptr,OPEN_EXISTING,0,nullptr);
+    require(held!=INVALID_HANDLE_VALUE,"hold UNC handle");
+    std::this_thread::sleep_for(3s);
+    require(wz_tick()==1&&volume(a).handles>0,"open handle prevents expiry");
+    wchar_t drive[16]{};
+    require(wz_mount(first.c_str(),&o,drive,16)==0,"reject duplicate drive mount");
+    CloseHandle(held);waitClosed(a);
+    for(int i=0;i<100&&wz_count();++i){std::this_thread::sleep_for(100ms);require(wz_tick()==1,"UNC idle save");}
+    require(wz_count()==0&&read(first)!=before,"UNC idle expiry saved and released");
+    require(read(aa/L"edited.txt")=="UNC batch","same UNC path reopens saved archive");
+    require(GetLogicalDrives()==drives,"never allocates a drive letter");
+    waitClosed(a);require(wz_eject(a)==1,"explicit UNC close");
+    require(wz_count()==0,"UNC session released");
+    require(read(fs::path(cab)/L"sample.txt")=="original"&&volume(cab).readOnly,"UNC readonly format");
+    HANDLE denied=CreateFileW((fs::path(cab)/L"new.txt").c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
+    require(denied==INVALID_HANDLE_VALUE,"UNC readonly write rejected");
+    waitClosed(cab);require(wz_eject(cab)==1,"close readonly UNC");
+    require(wz_shutdown()==1&&GetLogicalDrives()==drives,"stop UNC namespace");
+}
 int wmain(int argc,wchar_t** argv) {
     try {
         if(argc==3&&std::wstring_view(argv[1])==L"--crash-fixture") {
@@ -284,6 +331,7 @@ int wmain(int argc,wchar_t** argv) {
             fs::copy_file(root/L"ui.zip",root/L"safety.zip",fs::copy_options::overwrite_existing);
             safety(root/L"safety.zip",root);
             idle(root/L"idle.zip");
+            uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");
         std::cout<<"Native tests passed\n";return 0;

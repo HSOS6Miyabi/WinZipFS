@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <objbase.h>
 #include <shlobj.h>
+#include <sddl.h>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -137,11 +139,12 @@ struct Session {
     Ptfs ptfs;
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
-    bool mounted=false,protectedArchive=false;
+    bool mounted=false,protectedArchive=false,uncMode=false;
     std::unique_ptr<FileHandle> lease;
     unsigned long long retryAfter=0;
     std::wstring notifiedError;
-    Session(const fs::path& p,const WzOptions& o,bool forceReadOnly,const wchar_t* password):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
+    Session(const fs::path& p,const WzOptions& o,bool forceReadOnly,const wchar_t* password,std::wstring uncAddress={}):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
+        uncMode=!uncAddress.empty();
         checkOptions(o);
         cache=local()/guid(); root=cache/L"files";
         fs::create_directories(root);
@@ -162,13 +165,16 @@ struct Session {
             marker(cache/L"ready");
             auto s=root.wstring();
             if(!NT_SUCCESS(ptfs.SetPath(s.data()))) throw std::runtime_error("Cannot open cache directory");
-            DWORD used=GetLogicalDrives();
-            for(wchar_t letter=L'Z';letter>=L'D';--letter) {
-                if(used & (1u<<(letter-L'A'))) continue;
-                wchar_t d[]={letter,L':',0};
-                if(NT_SUCCESS(host.Mount(d))) {drive=host.MountPoint();mounted=true;break;}
+            if(uncMode) drive=std::move(uncAddress);
+            else {
+                DWORD used=GetLogicalDrives();
+                for(wchar_t letter=L'Z';letter>=L'D';--letter) {
+                    if(used & (1u<<(letter-L'A'))) continue;
+                    wchar_t d[]={letter,L':',0};
+                    if(NT_SUCCESS(host.Mount(d))) {drive=host.MountPoint();mounted=true;break;}
+                }
+                if(!mounted) throw std::runtime_error("WinFsp mount failed. Check driver and available drive letters.");
             }
-            if(!mounted) throw std::runtime_error("WinFsp mount failed. Check driver and available drive letters.");
             ptfs.Touch();
             if(ptfs.readOnly) status=protectedArchive?L"Read-only · protected":L"Read-only";
         } catch(...) {
@@ -246,13 +252,13 @@ struct Session {
     }
     void discard() {
         freeze();
-        host.Unmount();mounted=false;ptfs.dirty=false;
+        if(mounted) host.Unmount();mounted=false;ptfs.dirty=false;
     }
     void save(bool eject) {
         freeze();
         try {
             commitFrozen();
-            if(eject) {host.Unmount();mounted=false;}
+            if(eject) {if(mounted) host.Unmount();mounted=false;}
             else {ptfs.Touch();ptfs.closing=false;}
             retryAfter=0;notifiedError.clear();status=ptfs.readOnly?(protectedArchive?L"Read-only · protected":L"Read-only"):L"Saved";
         } catch(const std::exception& e) {status=wide(e.what());ptfs.closing=false;ptfs.Touch();throw;}
@@ -260,6 +266,9 @@ struct Session {
     }
 };
 std::vector<std::unique_ptr<Session>> sessions;
+unsigned uncCacheSeconds=30;
+WzOptions uncDefaults{0,5,0,5,0,0,1};
+bool uncStopping=false;
 Session& find(const wchar_t* d) {
     if(!d) throw std::runtime_error("Missing mount point");
     for(auto& s:sessions) if(same(s->drive,d)) return *s;
@@ -284,8 +293,9 @@ inline bool inside(const fs::path& path,const fs::path& parent) {
     return true;
 }
 inline void independentPath(const fs::path& p) {
+    if(lower(p.wstring()).starts_with(L"\\\\winzipfs\\")) throw std::runtime_error("Choose a path outside the WinZipFS UNC namespace");
     for(const auto& session:sessions) {
-        if(same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring())||inside(p,session->cache))
+        if((!session->uncMode&&same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring()))||inside(p,session->cache))
             throw std::runtime_error("Choose a path outside mounted archive drives and their caches");
     }
     if(inside(p,local())) throw std::runtime_error("Choose a path outside the recovery cache");
@@ -299,6 +309,7 @@ inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsi
     auto id=Fingerprint(p);
     for(const auto& session:sessions) {
         if(same(session->original.wstring(),p.wstring())||id==session->fingerprint) {
+            if(session->uncMode) throw std::runtime_error("The archive is already open in UNC mode. Close that session before assigning a drive letter.");
             if(ro&&!session->ptfs.readOnly) throw std::runtime_error("The archive is already mounted read/write. Eject it before mounting read-only.");
             copy(mount,size,session->drive);return;
         }
@@ -307,6 +318,8 @@ inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsi
     auto session=std::make_unique<Session>(p,*o,ro,password);
     copy(mount,size,session->drive);sessions.push_back(std::move(session));
 }
+// The namespace uses a single network volume; individual archives own only cache sessions.
+#include "unc.hpp"
 inline bool validId(std::wstring_view id) {
     if(id.size()!=38||id.front()!=L'{'||id.back()!=L'}') return false;
     for(size_t i=1;i<37;++i) {
@@ -428,12 +441,53 @@ int wz_discard(const wchar_t* drive) {
         std::erase_if(wz::sessions,[&](const auto& p){return p.get()==&session;});
     });
 }
+int wz_unc_start(const WzOptions* options,unsigned cacheSeconds) {
+    return wz::call([&]{
+        if(!options||cacheSeconds>86400) throw std::runtime_error("Invalid UNC cache settings");
+        wz::checkOptions(*options);
+        if(wz::uncStopping) throw std::runtime_error("UNC namespace is stopping");
+        if(!wz::unc) {
+            if(!NT_SUCCESS(Fsp::Initialize())) throw std::runtime_error("WinFsp is not installed");
+            wz::unc=std::make_unique<wz::UncFs>();
+        }
+        wz::uncDefaults=*options;wz::uncCacheSeconds=cacheSeconds;
+    });
+}
+int wz_unc_settings(const WzOptions* options,unsigned cacheSeconds) {
+    return wz::call([&]{
+        if(!options||cacheSeconds>86400) throw std::runtime_error("Invalid UNC cache settings");
+        wz::checkOptions(*options);wz::uncDefaults=*options;wz::uncCacheSeconds=cacheSeconds;
+    });
+}
+int wz_unc_root(wchar_t* out,unsigned size) {
+    return wz::call([&]{
+        if(!wz::unc) throw std::runtime_error("UNC namespace is unavailable");
+        wz::copyExact(out,size,wz::unc->address);
+    });
+}
+int wz_unc_path(const wchar_t* path,wchar_t* out,unsigned size) {
+    return wz::call([&]{
+        if(!path||!wz::unc) throw std::runtime_error("UNC namespace is unavailable");
+        auto source=wz::uncSourcePath(path);
+        wz::copyExact(out,size,wz::unc->addressFor(source));
+    });
+}
+int wz_mount_unc(const wchar_t* path,const WzOptions* options,int readOnly,const wchar_t* password,wchar_t* out,unsigned size) {
+    return wz::call([&]{
+        if(!path||!options||!wz::unc) throw std::runtime_error("UNC namespace is unavailable");
+        auto source=wz::uncSourcePath(path);
+        auto address=wz::unc->addressFor(source);
+        wz::copyExact(out,size,address);
+        wz::unc->openSession(source,address,*options,readOnly!=0,password);
+    });
+}
 int wz_count() {std::lock_guard lock(wz::manager);return (int)wz::sessions.size();}
 int wz_get(int i,WzVolume* out) {
     return wz::call([&]{
         if(!out||i<0||i>=int(wz::sessions.size())) throw std::runtime_error("Invalid volume index");
         auto& s=*wz::sessions[i]; *out={};
-        wz::copy(out->archive,32768,s.original.wstring());wz::copy(out->mount,16,s.drive);
+        wz::copy(out->archive,32768,s.original.wstring());wz::copy(out->mount,32768,s.drive);
+        out->uncMode=s.uncMode;
         wz::copy(out->status,512,s.status);
         out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;out->handles=s.ptfs.handles;out->options=s.options;
         wz::copy(out->sessionId,64,s.cache.filename().wstring());
@@ -464,7 +518,10 @@ int wz_tick() {return wz::call([&]{
         auto& s=**i;
         try {
             if(now<s.retryAfter) {++i;continue;}
-            if(s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes)) {s.save(true);i=wz::sessions.erase(i);continue;}
+            if((s.uncMode && s.idle(now,1000ULL*wz::uncCacheSeconds)) ||
+               (!s.uncMode && s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes))) {
+                s.save(true);i=wz::sessions.erase(i);continue;
+            }
             if(!s.options.batch&&s.ptfs.dirty&&s.idle(now,1000ULL*s.options.delaySeconds)) s.save(false);
         } catch(const std::exception& e) {
             s.status=wz::wide(e.what());s.retryAfter=GetTickCount64()+30000;
@@ -478,8 +535,16 @@ int wz_tick() {return wz::call([&]{
     }
     if(!failures.empty()) throw std::runtime_error(wz::utf8(failures));
 });}
-int wz_shutdown() {return wz::call([&]{
-    while(!wz::sessions.empty()) {wz::sessions.back()->save(true);wz::sessions.pop_back();}
-});}
+int wz_shutdown() {
+    std::unique_ptr<wz::UncFs> closing;
+    int result=wz::call([&]{
+        while(!wz::sessions.empty()) {wz::sessions.back()->save(true);wz::sessions.pop_back();}
+        wz::uncStopping=true;
+        closing=std::move(wz::unc);
+    });
+    closing.reset(); // Stop network callbacks outside the session mutex.
+    {std::lock_guard lock(wz::manager);wz::uncStopping=false;}
+    return result;
+}
 void wz_error(wchar_t* out,unsigned size) {wz::copy(out,size,wz::error);}
 }

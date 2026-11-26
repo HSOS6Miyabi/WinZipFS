@@ -686,7 +686,9 @@ public:
             FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY_COARSE :
             FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY_FINE);
         FspFileSystemSetDebugLog(_FileSystemPtr, DebugLog);
-        Result = FspFileSystemSetMountPointEx(_FileSystemPtr, MountPoint, SecurityDescriptor);
+        // An empty mount point with a UNC prefix registers only the network volume.
+        Result = MountPoint && !*MountPoint && _VolumeParams.Prefix[0] ?
+            STATUS_SUCCESS : FspFileSystemSetMountPointEx(_FileSystemPtr, MountPoint, SecurityDescriptor);
         if (NT_SUCCESS(Result))
         {
             try

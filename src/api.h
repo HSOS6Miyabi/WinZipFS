@@ -13,8 +13,8 @@ typedef struct WzOptions {
     int batch, delaySeconds, idleMinutes, level, method, threads, solid;
 } WzOptions;
 typedef struct WzVolume {
-    wchar_t archive[32768], mount[16], status[512];
-    int readOnly, dirty, protectedArchive;
+    wchar_t archive[32768], mount[32768], status[512];
+    int readOnly, dirty, protectedArchive, uncMode;
     unsigned handles;
     wchar_t sessionId[64];
     WzOptions options;
@@ -34,6 +34,11 @@ WZ_API int wz_recovery_discard(const wchar_t* id);
 WZ_API int wz_mount_readonly(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
 WZ_API int wz_save_copy(const wchar_t* mount, const wchar_t* destination);
 WZ_API int wz_discard(const wchar_t* mount);
+WZ_API int wz_unc_start(const WzOptions* options, unsigned cacheSeconds);
+WZ_API int wz_unc_settings(const WzOptions* options, unsigned cacheSeconds);
+WZ_API int wz_unc_root(wchar_t* path, unsigned size);
+WZ_API int wz_unc_path(const wchar_t* archive, wchar_t* path, unsigned size);
+WZ_API int wz_mount_unc(const wchar_t* archive, const WzOptions* options, int readOnly, const wchar_t* password, wchar_t* path, unsigned size);
 WZ_API int wz_count(void);
 WZ_API int wz_get(int index, WzVolume* info);
 WZ_API int wz_options(const wchar_t* mount, const WzOptions* options);

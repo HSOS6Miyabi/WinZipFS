@@ -65,7 +65,7 @@ public:
     void Touch() { lastActivity = GetTickCount64(); }
     void Changed() { dirty = true; Touch(); }
 
-protected:
+public:
     static NTSTATUS GetFileInfoInternal(HANDLE Handle, FileInfo *FileInfo);
     NTSTATUS Init(PVOID Host);
     NTSTATUS GetVolumeInfo(
@@ -201,6 +201,7 @@ struct PtfsFileDesc
     }
     HANDLE Handle;
     PVOID DirBuffer;
+    Ptfs* owner=nullptr;
 };
 
 Ptfs::Ptfs() : FileSystemBase(), _Path()
