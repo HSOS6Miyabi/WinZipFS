@@ -290,6 +290,8 @@ void uncMode(fs::path const& fixtures) {
     require(wz_unc_root(root,WZ_MOUNT_CAPACITY)==1,"get UNC root");
     require(wz_unc_path(first.c_str(),a,WZ_MOUNT_CAPACITY)==1&&wz_unc_path(second.c_str(),b,WZ_MOUNT_CAPACITY)==1,"generate UNC addresses");
     require(wz_unc_path((fixtures/L"readonly.cab").c_str(),cab,WZ_MOUNT_CAPACITY)==1,"generate readonly UNC");
+    wchar_t explicitRo[WZ_MOUNT_CAPACITY]{};
+    require(wz_unc_path_readonly(first.c_str(),explicitRo,WZ_MOUNT_CAPACITY)==1,"generate explicit readonly address");
     require(wz_count()==0&&GetLogicalDrives()==drives,"no eager archive session or drive letter");
     require(std::wstring_view(a).starts_with(L"\\\\WinZipFS\\"),"UNC address");
     auto aa=fs::path(a),bb=fs::path(b);
@@ -319,6 +321,11 @@ void uncMode(fs::path const& fixtures) {
     require(GetLogicalDrives()==drives,"never allocates a drive letter");
     waitClosed(a);require(wz_eject(a)==1,"explicit UNC close");
     require(wz_count()==0,"UNC session released");
+    require(read(fs::path(explicitRo)/L"sample.txt")=="original"&&volume(explicitRo).readOnly,"explicit read-only address");
+    waitClosed(explicitRo);require(wz_eject(explicitRo)==1,"release explicit read-only");
+    require(read(fs::path(explicitRo)/L"sample.txt")=="original"&&volume(explicitRo).readOnly,"read-only persists across idle reopens");
+    require((GetFileAttributesW((fs::path(explicitRo)/L"sample.txt").c_str())&FILE_ATTRIBUTE_READONLY)!=0,"read-only file attributes");
+    waitClosed(explicitRo);require(wz_eject(explicitRo)==1,"release read-only reopening");
     require(read(fs::path(cab)/L"sample.txt")=="original"&&volume(cab).readOnly,"UNC readonly format");
     HANDLE denied=CreateFileW((fs::path(cab)/L"new.txt").c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
     require(denied==INVALID_HANDLE_VALUE,"UNC readonly write rejected");

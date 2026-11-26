@@ -55,8 +55,8 @@ class Dashboard {
     Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
            systemDefaultsBtn{nullptr},recoveryBtn{nullptr},hideBtn{nullptr},exitBtn{nullptr};
-    Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},uncApplyBtn{nullptr},recompressBtn{nullptr};
-    TextBox uncRoot{nullptr},uncSeconds{nullptr};
+    Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},copyAddressBtn{nullptr},uncApplyBtn{nullptr},recompressBtn{nullptr};
+    TextBox uncRoot{nullptr},uncSeconds{nullptr},uncSessionSeconds{nullptr};
     ToggleSwitch preferUnc{nullptr};
     shell::UncSettings uncSettings=shell::loadUncSettings();
     bool uncAvailable=false;
@@ -103,6 +103,8 @@ class Dashboard {
         batch.IsOn(o.batch!=0);solid.IsOn(o.solid!=0);
         delay.Text(hs(std::to_wstring(o.delaySeconds)));idle.Text(hs(std::to_wstring(o.idleMinutes)));
         threads.Text(hs(std::to_wstring(o.threads)));
+        auto row=current();
+        uncSessionSeconds.Text(hs(std::to_wstring(row&&row->uncMode?row->uncCacheSeconds:uncSettings.seconds)));
         auto it=std::find(std::begin(levels),std::end(levels),o.level);
         level.SelectedIndex(it==std::end(levels)?3:int(it-std::begin(levels)));
         method.SelectedIndex(o.method>=0&&o.method<=4?o.method:0);
@@ -130,7 +132,12 @@ class Dashboard {
         std::wstring s=r?std::wstring(r->archive)+L"\n"+r->mount+L"   ·   Open handles: "+std::to_wstring(r->handles)+
                 L"   ·   "+r->status+(r->dirty?L"   ·   Pending writeback":L"")
             :L"Select a mounted archive to manage its settings.";
+        if(r&&r->uncMode)s+=L"   ·   Idle cache: "+std::to_wstring(r->uncCacheSeconds)+L" s";
         details.Text(hs(s));
+        bool isUnc=r&&r->uncMode;
+        idle.Visibility(isUnc?Visibility::Collapsed:Visibility::Visible);
+        uncSessionSeconds.Visibility(isUnc?Visibility::Visible:Visibility::Collapsed);
+        copyAddressBtn.IsEnabled(r!=nullptr);
         openBtn.IsEnabled(r!=nullptr);ejectBtn.IsEnabled(r!=nullptr);
         applyBtn.IsEnabled(r!=nullptr);flushBtn.IsEnabled(r&&!r->readOnly);
         exportBtn.IsEnabled(r&&!r->protectedArchive);
@@ -147,6 +154,7 @@ class Dashboard {
         if(!changed) for(size_t i=0;i<rows.size();++i) if(rowText(rows[i])!=rowText(updated[i])||std::wstring_view(rows[i].sessionId)!=updated[i].sessionId) {changed=true;break;}
         auto previous=selected;
         auto prior=current()?current()->options:defaults;
+        auto priorCache=current()?current()->uncCacheSeconds:uncSettings.seconds;
         auto priorId=current()?std::wstring(current()->sessionId):L"";
         if(updated.size()>rows.size()) {
             auto fresh=std::find_if(updated.rbegin(),updated.rend(),[&](auto const& v){
@@ -170,7 +178,8 @@ class Dashboard {
         auto next=current()?current()->options:defaults;
         if(priorId!=(current()?std::wstring(current()->sessionId):L"")||previous!=selected||prior.batch!=next.batch||prior.delaySeconds!=next.delaySeconds||
            prior.idleMinutes!=next.idleMinutes||prior.level!=next.level||prior.method!=next.method||
-           prior.threads!=next.threads||prior.solid!=next.solid) load(next);
+           prior.threads!=next.threads||prior.solid!=next.solid||
+           priorCache!=(current()?current()->uncCacheSeconds:uncSettings.seconds)) load(next);
         summary.Text(hs(std::to_wstring(rows.size())+L" mounted  ·  "+
             std::to_wstring(std::count_if(rows.begin(),rows.end(),[](const auto& r){return r.dirty!=0;}))+L" pending writeback"));
         updateDetails();
@@ -391,9 +400,12 @@ class Dashboard {
         if(selected.empty()) return;
         try {
             auto o=readOptions();auto drive=selected;auto id=sessionId(drive);
-            queue([drive,o,id] {
+            bool useUnc=current()&&current()->uncMode;
+            unsigned seconds=useUnc?static_cast<unsigned>(checkedNumber(uncSessionSeconds,0,86400)):0;
+            queue([drive,o,id,useUnc,seconds] {
                 if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
-                return wz_options(drive.c_str(),&o)?L"Settings updated for "+drive:L"Error: "+coreError();
+                int ok=useUnc?wz_unc_session_options(drive.c_str(),&o,seconds):wz_options(drive.c_str(),&o);
+                return ok?L"Settings updated for "+drive:L"Error: "+coreError();
             });
         }catch(...){say(L"Error: Check numeric ranges and compression settings.");}
     }
@@ -434,6 +446,7 @@ class Dashboard {
         add(root,L"Mount archive…",[this]{show();browse();});
         add(root,L"Mount read-only…",[this]{show();browse(true);});
         add(root,L"Open UNC archive…",[this]{show();browse(false,true);},MF_STRING|(uncAvailable?0:MF_GRAYED));
+        add(root,L"Open UNC read-only…",[this]{show();browse(true,true);},MF_STRING|(uncAvailable?0:MF_GRAYED));
         add(root,L"Copy UNC path…",[this]{show();copyUncPath();},MF_STRING|(uncAvailable?0:MF_GRAYED));
         AppendMenuW(root,MF_SEPARATOR,0,nullptr);
         if(rows.empty()) AppendMenuW(root,MF_STRING|MF_GRAYED,0,L"No mounted archives");
@@ -442,6 +455,7 @@ class Dashboard {
             auto opt=r.options;bool readOnly=r.readOnly!=0;auto id=std::wstring(r.sessionId);
             HMENU sub=CreatePopupMenu();
             add(sub,L"Open drive",[this,drive]{openDrive(drive);});
+            add(sub,L"Copy address",[this,drive]{try{shell::clipboard(hwnd,drive);say(L"Archive address copied.");}catch(...){say(L"Error: Cannot copy the archive address.");}});
             add(sub,L"Compression and cache settings",[this,drive]{selectDrive(drive);});
             add(sub,L"Batch write mode",[this,drive,opt,id]() mutable {
                 opt.batch=!opt.batch;
@@ -539,7 +553,8 @@ class Dashboard {
         details=identify(text(L"Select a mounted archive."),L"Details");volumes.Children().Append(details);
         auto actions=horizontal();
         openBtn=button(L"Open drive",L"Open");flushBtn=button(L"Save changes",L"Flush");ejectBtn=button(L"Eject",L"Eject");
-        actions.Children().Append(openBtn);actions.Children().Append(flushBtn);actions.Children().Append(ejectBtn);
+        copyAddressBtn=button(L"Copy address",L"CopyAddress");
+        actions.Children().Append(openBtn);actions.Children().Append(flushBtn);actions.Children().Append(ejectBtn);actions.Children().Append(copyAddressBtn);
         volumes.Children().Append(actions);
         auto protection=horizontal();
         exportBtn=button(L"Save archive copy…",L"SaveCopy");
@@ -554,7 +569,8 @@ class Dashboard {
         settings.Children().Append(text(L"Batch mode keeps modifications in the local cache until Save changes or Eject."));
         auto time=horizontal(12);
         delay=number(L"Writeback delay (seconds)",L"Delay");idle=number(L"Auto-eject (minutes, 0 = off)",L"Idle");
-        time.Children().Append(delay);time.Children().Append(idle);settings.Children().Append(time);
+        uncSessionSeconds=number(L"UNC idle cache (seconds)",L"UncSessionSeconds");
+        time.Children().Append(delay);time.Children().Append(idle);time.Children().Append(uncSessionSeconds);settings.Children().Append(time);
         auto compression=horizontal(12);
         level=combo(L"Compression level",L"Level",{L"Store (0)",L"Fastest (1)",L"Fast (3)",L"Normal (5)",L"Maximum (7)",L"Ultra (9)"});
         method=combo(L"Compression method",L"Method",{L"Automatic",L"Store",L"Deflate (ZIP)",L"LZMA2 (7z)",L"BZip2 (ZIP / 7z)"});
@@ -618,6 +634,9 @@ class Dashboard {
             load(current()?current()->options:defaults);updateDetails();
         });
         openBtn.Click([this](auto&&,auto&&){openDrive(selected);});
+        copyAddressBtn.Click([this](auto&&,auto&&){
+            if(!selected.empty())try{shell::clipboard(hwnd,selected);say(L"Archive address copied.");}catch(...){say(L"Error: Cannot copy the archive address.");}
+        });
         flushBtn.Click([this](auto&&,auto&&){save(selected,false);});
         ejectBtn.Click([this](auto&&,auto&&){save(selected,true);});
         applyBtn.Click([this](auto&&,auto&&){apply();});

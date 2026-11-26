@@ -353,6 +353,7 @@ NTSTATUS Ptfs::GetSecurityByName(
         }
 
         *PFileAttributes = AttributeTagInfo.FileAttributes;
+        if(readOnly) *PFileAttributes |= FILE_ATTRIBUTE_READONLY;
     }
 
     if (0 != PSecurityDescriptorSize)
@@ -484,6 +485,7 @@ NTSTATUS Ptfs::Open(
     NTSTATUS result = GetFileInfoInternal(FileDesc->Handle, &OpenFileInfo->FileInfo);
     if (!NT_SUCCESS(result)) { delete FileDesc; return result; }
     *PFileDesc = FileDesc;
+    if(readOnly) OpenFileInfo->FileInfo.FileAttributes |= FILE_ATTRIBUTE_READONLY;
     ++handles; Touch();
     return result;
 }
@@ -648,7 +650,9 @@ NTSTATUS Ptfs::GetFileInfo(
 {
     HANDLE Handle = HandleFromFileDesc(FileDesc);
 
-    return GetFileInfoInternal(Handle, FileInfo);
+    auto result=GetFileInfoInternal(Handle,FileInfo);
+    if(NT_SUCCESS(result)&&readOnly)FileInfo->FileAttributes|=FILE_ATTRIBUTE_READONLY;
+    return result;
 }
 
 NTSTATUS Ptfs::SetBasicInfo(
@@ -875,6 +879,7 @@ NTSTATUS Ptfs::ReadDirectoryEntry(
     Length = (ULONG)wcslen(FindData.cFileName);
     DirInfo->Size = (UINT16)(FIELD_OFFSET(Ptfs::DirInfo, FileNameBuf) + Length * sizeof(WCHAR));
     DirInfo->FileInfo.FileAttributes = FindData.dwFileAttributes;
+    if(readOnly)DirInfo->FileInfo.FileAttributes|=FILE_ATTRIBUTE_READONLY;
     DirInfo->FileInfo.ReparseTag = 0;
     DirInfo->FileInfo.FileSize =
         ((UINT64)FindData.nFileSizeHigh << 32) | (UINT64)FindData.nFileSizeLow;

@@ -401,6 +401,12 @@ def test_settings():
     wait_closed()
     click("Flush")
     status_contains("Saved")
+    window.set_focus()
+    ctl("Recompress",bring_into_view=True).click_input()
+    dialog=Desktop(backend="win32").window(title="WinZipFS - Recompress archive",class_name="#32770")
+    dialog.wait("exists ready",timeout=20)
+    dialog.child_window(control_id=6,class_name="Button").click_input()
+    status_contains("Recompressed")
     with ZipFile(FIX / "ui.zip", "r") as archive:
         assert archive.read("ui.txt") == b"WinUI writeback"
     click("Open")
@@ -614,6 +620,20 @@ def test_unc():
     choose_archive(FIX/"ui.zip","MountUncReadOnly")
     status_contains("Mounted")
     assert not ctl("Flush").is_enabled()
+    click("CopyAddress")
+    status_contains("Archive address copied")
+    win32clipboard.OpenClipboard()
+    try:
+        ro_address=win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+    assert "\\ReadOnly\\" in ro_address
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    assert (Path(ro_address)/"sample.txt").read_text()=="original"
+    wait_for(lambda: "Read-only" in ctl("Details").window_text(),"read-only path did not reopen")
+    assert not ctl("Flush").is_enabled()
     wait_closed()
     click("Eject")
     status_contains("Ejected")
@@ -630,9 +650,26 @@ def test_unc():
     choose_archive(FIX/"ui.zip","MountUnc")
     status_contains("Mounted")
     assert drive_mask()==before
-    wait_closed()
-    click("Eject")
+    value("UncSessionSeconds",1)
+    click("Apply")
+    status_contains("Settings updated")
+    wait_for(lambda: "0 mounted" in ctl("Summary").window_text(),"per-session expiry did not occur")
+    tray_menu("Open UNC archive…")
+    complete_archive_dialog(FIX/"ui.zip")
+    status_contains("Mounted")
+    tray_menu("UNC  ui.zip","Copy address")
+    status_contains("Archive address copied")
+    tray_menu("UNC  ui.zip","Eject")
     status_contains("Ejected")
+    tray_menu("Open UNC read-only…")
+    complete_archive_dialog(FIX/"ui.zip")
+    status_contains("Mounted")
+    assert not ctl("Flush").is_enabled()
+    tray_menu("UNC  ui.zip","Eject")
+    status_contains("Ejected")
+    tray_menu("Copy UNC path…")
+    complete_archive_dialog(FIX/"ui.zip")
+    status_contains("UNC path copied")
     exit_application()
 
 

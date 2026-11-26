@@ -110,15 +110,23 @@ class UncFs final : public Fsp::FileSystemBase {
                 return {&item->ptfs,name.size()==relative.size()?L"\\":name.substr(relative.size())};
             }
         }
-        if(name.size()<2||(name.size()>2&&name[2]!=L'\\'))throw std::runtime_error("Invalid UNC drive component");
-        wchar_t letter=towupper(name[1]);
-        if(letter<L'A'||letter>L'Z'||!localDrive(letter)) throw std::runtime_error("Invalid local drive");
-        fs::path source(std::wstring{letter,L':',L'\\'});
-        if(name.size()==2) {
+        constexpr std::wstring_view readonlyPrefix=L"\\ReadOnly";
+        bool readOnly=prefixPath(name,readonlyPrefix);
+        if(readOnly&&name.size()==readonlyPrefix.size()) {
             fs::create_directories(shadowPath/name.substr(1));
             return {&shadow,name};
         }
-        for(size_t pos=3;pos<name.size();) {
+        size_t driveOffset=readOnly?readonlyPrefix.size()+1:1;
+        if(name.size()<=driveOffset||(name.size()>driveOffset+1&&name[driveOffset+1]!=L'\\'))
+            throw std::runtime_error("Invalid UNC drive component");
+        wchar_t letter=towupper(name[driveOffset]);
+        if(letter<L'A'||letter>L'Z'||!localDrive(letter)) throw std::runtime_error("Invalid local drive");
+        fs::path source(std::wstring{letter,L':',L'\\'});
+        if(name.size()==driveOffset+1) {
+            fs::create_directories(shadowPath/name.substr(1));
+            return {&shadow,name};
+        }
+        for(size_t pos=driveOffset+2;pos<name.size();) {
             size_t end=name.find(L'\\',pos);if(end==std::wstring::npos)end=name.size();
             source/=name.substr(pos,end-pos);
             independentPath(source);
@@ -129,7 +137,7 @@ class UncFs final : public Fsp::FileSystemBase {
                 if(!archiveSuffix(source)) throw std::runtime_error("The UNC source is not an archive");
                 auto canonical=uncSourcePath(source);
                 auto rootName=name.substr(0,end);
-                auto& opened=openSession(canonical,address+rootName,uncDefaults,false,nullptr);
+                auto& opened=openSession(canonical,address+rootName,uncDefaults,readOnly,nullptr);
                 return {&opened.ptfs,end==name.size()?L"\\":name.substr(end)};
             }
             pos=end+1;
@@ -268,9 +276,9 @@ public:
             }
         }catch(...){}
     }
-    std::wstring addressFor(fs::path const& source) const {
+    std::wstring addressFor(fs::path const& source,bool readOnly=false) const {
         auto path=source.wstring();
-        auto result=address+L"\\"+std::wstring(1,towupper(path[0]))+path.substr(2);
+        auto result=address+(readOnly?L"\\ReadOnly\\":L"\\")+std::wstring(1,towupper(path[0]))+path.substr(2);
         if(result.size()>=WZ_MOUNT_CAPACITY)throw std::runtime_error("UNC archive path is too long");
         return result;
     }
@@ -285,6 +293,7 @@ public:
             item->ptfs.Touch();return *item;
         }
         auto opened=std::make_unique<Session>(source,options,readOnly,password,requested);
+        opened->cacheSeconds=uncCacheSeconds;
         // Keep only directory names in the virtual namespace, never archive data.
         fs::create_directories(shadowPath/requested.substr(address.size()+1));
         auto& result=*opened;sessions.push_back(std::move(opened));return result;

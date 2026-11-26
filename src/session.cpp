@@ -143,6 +143,7 @@ struct Session {
     std::wstring drive,status=L"Ready";
     bool mounted=false,protectedArchive=false,uncMode=false;
     std::unique_ptr<FileHandle> lease;
+    unsigned cacheSeconds=30;
     unsigned long long retryAfter=0;
     std::wstring notifiedError;
     Session(const fs::path& p,const WzOptions& o,bool forceReadOnly,const wchar_t* password,std::wstring uncAddress={}):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
@@ -490,11 +491,18 @@ int wz_unc_path(const wchar_t* path,wchar_t* out,unsigned size) {
         wz::copyExact(out,size,wz::unc->addressFor(source));
     });
 }
+int wz_unc_path_readonly(const wchar_t* path,wchar_t* out,unsigned size) {
+    return wz::call([&]{
+        if(!path||!wz::unc) throw std::runtime_error("UNC namespace is unavailable");
+        auto source=wz::uncSourcePath(path);
+        wz::copyExact(out,size,wz::unc->addressFor(source,true));
+    });
+}
 int wz_mount_unc(const wchar_t* path,const WzOptions* options,int readOnly,const wchar_t* password,wchar_t* out,unsigned size) {
     return wz::call([&]{
         if(!path||!options||!wz::unc) throw std::runtime_error("UNC namespace is unavailable");
         auto source=wz::uncSourcePath(path);
-        auto address=wz::unc->addressFor(source);
+        auto address=wz::unc->addressFor(source,readOnly!=0||(password&&*password));
         wz::copyExact(out,size,address);
         wz::unc->openSession(source,address,*options,readOnly!=0,password);
     });
@@ -504,7 +512,7 @@ static void fillVolume(wz::Session& s,WzVolume* out) {
     *out={};
     wz::copy(out->archive,32768,s.original.wstring());
     wz::copy(out->mount,WZ_MOUNT_CAPACITY,s.drive);
-    out->uncMode=s.uncMode;
+    out->uncMode=s.uncMode;out->uncCacheSeconds=s.cacheSeconds;
     wz::copy(out->status,512,s.status);
     out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;
     out->handles=s.ptfs.handles;out->options=s.options;
@@ -524,8 +532,7 @@ int wz_snapshot(WzVolume* out,unsigned capacity) {
         for(int i=0;i<count;++i) fillVolume(*wz::sessions[i],out+i);
     return count;
 }
-int wz_options(const wchar_t* d,const WzOptions* o) {
-    return wz::call([&]{
+static void applyVolumeOptions(const wchar_t* d,const WzOptions* o,std::optional<unsigned> cacheSeconds) {
         if(!o) throw std::runtime_error("Missing options");
         wz::checkOptions(*o);auto& s=wz::find(d);
         if(o->method==3 && s.format.inner!=&bit7z::BitFormat::SevenZip)
@@ -534,8 +541,18 @@ int wz_options(const wchar_t* d,const WzOptions* o) {
             throw std::runtime_error("Deflate is available for ZIP only");
         if(o->method==4 && s.format.inner!=&bit7z::BitFormat::Zip && s.format.inner!=&bit7z::BitFormat::SevenZip)
             throw std::runtime_error("BZip2 is available for ZIP and 7z only");
+        if(cacheSeconds) {
+            if(!s.uncMode||*cacheSeconds>86400)throw std::runtime_error("Invalid UNC session cache time");
+            s.cacheSeconds=*cacheSeconds;
+        }
         s.options=*o;
-    });
+
+}
+int wz_options(const wchar_t* d,const WzOptions* o) {
+    return wz::call([&]{applyVolumeOptions(d,o,std::nullopt);});
+}
+int wz_unc_session_options(const wchar_t* d,const WzOptions* o,unsigned cacheSeconds) {
+    return wz::call([&]{applyVolumeOptions(d,o,cacheSeconds);});
 }
 int wz_flush(const wchar_t* d) {return wz::call([&]{wz::find(d).save(false);});}
 int wz_recompress(const wchar_t* d) {return wz::call([&]{
@@ -556,7 +573,7 @@ int wz_tick() {return wz::call([&]{
         auto& s=**i;
         try {
             if(now<s.retryAfter) {++i;continue;}
-            if((s.uncMode && s.idle(now,1000ULL*wz::uncCacheSeconds)) ||
+            if((s.uncMode && s.idle(now,1000ULL*s.cacheSeconds)) ||
                (!s.uncMode && s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes))) {
                 s.save(true);
                 if(s.uncMode&&wz::unc)wz::unc->releasePath(s.drive);
