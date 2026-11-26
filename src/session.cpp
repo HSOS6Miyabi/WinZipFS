@@ -105,7 +105,7 @@ struct Session {
         if(!ptfs.dirty) return;
         if(ptfs.readOnly) throw std::runtime_error("Read-only archive");
         if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed; cache retained for recovery");
-        auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp");
+        auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp"+original.extension().wstring());
         auto backup=original.parent_path()/(L".winzipfs-"+guid()+L".bak");
         auto work=cache/L"repack.tar";
         bool replacing=false;

@@ -83,6 +83,15 @@ void roundtrip(fs::path const& archive) {
     require(read(root/L"renamed.txt")=="abc","persisted truncate and rename");
     require(!fs::exists(root/L"sample.txt"),"persisted deletion");
     require(fs::is_directory(root/L"empty"),"persisted empty directory");
+    for(const auto& p:std::vector<fs::path>{root/L"created.txt",root/L"renamed.txt",root/L"empty"})
+        require(fs::remove(p),"remove final entries");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(fs::is_empty(root),"empty archive persisted");
+    write(root/L"recreated.txt","recreated");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(read(root/L"recreated.txt")=="recreated","write to previously empty archive");
     eject(drive);
 }
 void readonly(fs::path const& archive) {

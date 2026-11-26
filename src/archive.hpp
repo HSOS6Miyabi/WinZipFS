@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -225,6 +226,34 @@ inline void configure(BitArchiveWriter& writer,const BitInOutFormat& fmt,const W
         writer.setCompressionMethod(m);
     }
 }
+inline void verifyManifest(const BitArchiveReader& reader,const fs::path& root) {
+    struct Entry { bool directory; uint64_t size; bool seen=false; };
+    std::map<std::wstring,Entry,CaseLess> expected;
+    for(const auto& file:fs::recursive_directory_iterator(root)) {
+        auto name=safeName(file.path().lexically_relative(root).wstring(),file.is_directory());
+        auto [it,inserted]=expected.emplace(name,Entry{file.is_directory(),file.is_directory()?0:file.file_size()});
+        if(!inserted) throw std::runtime_error("Conflicting cache names");
+    }
+    std::set<std::wstring,CaseLess> explicitNames;
+    for(const auto& item:reader.items()) {
+        auto name=safeName(item.rawPath(),item.isDir());
+        if(name.empty()) continue;
+        if(!explicitNames.insert(name).second) throw std::runtime_error("Duplicate entry in generated archive");
+        auto i=expected.find(name);
+        if(i==expected.end()||i->first!=name||i->second.directory!=item.isDir()||
+           (!item.isDir()&&i->second.size!=item.size()))
+            throw std::runtime_error("Generated archive does not match the cache: "+utf8(name));
+        i->second.seen=true;
+        for(size_t pos=name.find(L'\\');pos!=std::wstring::npos;pos=name.find(L'\\',pos+1)) {
+            auto parent=expected.find(name.substr(0,pos));
+            if(parent==expected.end()||!parent->second.directory)
+                throw std::runtime_error("Invalid generated directory path");
+            parent->second.seen=true;
+        }
+    }
+    for(const auto& [name,entry]:expected) if(!entry.seen)
+        throw std::runtime_error("Generated archive is missing "+utf8(name));
+}
 inline void pack(const Bit7zLibrary& lib,const fs::path& root,const fs::path& output,const fs::path& work,Format fmt,const WzOptions& opt) {
     if(!fmt.inner) throw std::runtime_error("Read-only archive format");
     verifyTree(root);
@@ -242,12 +271,15 @@ inline void pack(const Bit7zLibrary& lib,const fs::path& root,const fs::path& ou
         writer.compressTo(path8(output));
     }
     BitArchiveReader reader(lib,path8(output),fmt.outer?static_cast<const BitInFormat&>(*fmt.outer):*fmt.inner);
-    reader.test();
+    if(reader.itemsCount()) reader.test();
     if(fmt.outer) {
         TemporaryFile tar(work.parent_path()/L"verified.tar");
         extractStreamItem(reader,tar.path());
         BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
-        inner.test();
+        if(inner.itemsCount()) inner.test();
+        verifyManifest(inner,root);
+    } else {
+        verifyManifest(reader,root);
     }
 }
 }
