@@ -1,0 +1,2 @@
+Adapted from WinFsp v2.2, https://github.com/winfsp/winfsp/tree/v2.2 .
+Copyright 2015-2026 Bill Zissimopoulos. GPL-3.0. See upstream license.
