@@ -41,8 +41,21 @@ app = None
 window = None
 
 
-def ctl(identifier):
-    return window.child_window(auto_id=identifier).wrapper_object()
+def ctl(identifier, bring_into_view=False):
+    spec = window.child_window(auto_id=identifier, visible_only=False)
+    if spec.exists(timeout=0.5, retry_interval=0.1):
+        control = spec.wrapper_object()
+        if not bring_into_view or control.is_visible():
+            return control
+    scroll = window.child_window(auto_id="DashboardScroll", visible_only=False).wrapper_object()
+    for position in (0.0, 45.0, 75.0, 100.0):
+        scroll.iface_scroll.SetScrollPercent(-1.0, position)
+        time.sleep(0.35)
+        if spec.exists(timeout=0.5, retry_interval=0.1):
+            control = spec.wrapper_object()
+            if not bring_into_view or control.is_visible():
+                return control
+    raise AssertionError(f"Control {identifier} is unavailable")
 
 
 def click(identifier):
@@ -56,7 +69,7 @@ def value(identifier, text):
 
 
 def combo(identifier, index):
-    ctl(identifier).select(index)
+    ctl(identifier, bring_into_view=True).select(index)
 
 
 def toggle(identifier):
@@ -81,7 +94,8 @@ def drive_from_details():
 
 
 def choose_archive(path):
-    ctl("Mount").click_input()
+    window.set_focus()
+    ctl("Mount", bring_into_view=True).click_input()
     dialog = desktop.window(title="Open", control_type="Window")
     dialog.wait("exists ready", timeout=30)
     field = dialog.child_window(auto_id="1148", control_type="Edit")
@@ -170,10 +184,11 @@ try:
     window = app.window(title="WinZipFS")
     window.wait("exists ready", timeout=90)
     verify_tray_icon()
-    for name in ("Mount", "Hide", "Exit", "Progress", "Status", "Summary", "Volumes", "Details",
+    for name in ("DashboardScroll", "Mount", "Hide", "Exit", "Progress", "Status", "Summary", "Volumes", "Details",
                  "Open", "Flush", "Eject", "Batch", "Delay", "Idle", "Level", "Method", "Threads",
                  "Solid", "Apply", "LoadDefaults", "SaveDefaults", "Register", "Unregister",
                  "DefaultApps", "Recovery"):
+        print(f"Locate {name}", flush=True)
         ctl(name)
     click("Register")
     status_contains("registered")
@@ -210,7 +225,7 @@ try:
     wait_closed()
     click("Eject")
     status_contains("Ejected")
-    assert not Path(readonly_drive + "\\").exists()
+    wait_for(lambda: not Path(readonly_drive + "\\").exists(), "Read-only drive still mounted")
     select_volume("ui.zip")
     assert current_options() == (1, 8, 2, 4, 2, 2, 0)
     click("Unregister")
@@ -276,6 +291,14 @@ except Exception:
     try:
         if window is not None:
             window.capture_as_image().save(RESULTS / "ui-failure.png")
+    except Exception:
+        pass
+    try:
+        if window is not None:
+            import contextlib
+            with (RESULTS / "ui-controls.txt").open("w", encoding="utf-8") as out:
+                with contextlib.redirect_stdout(out):
+                    window.print_control_identifiers()
     except Exception:
         pass
     raise

@@ -129,13 +129,36 @@ void conflict(fs::path const& archive) {
     require(read(fs::path(drive+L"\\")/L"conflict.txt")=="cached modification","recovered edits persisted");
     eject(drive);
 }
+template<class Predicate>
+void waitUntil(Predicate&& condition,std::chrono::seconds limit,const char* what,std::wstring const& drive) {
+    const auto end=std::chrono::steady_clock::now()+limit;
+    do {
+        require(wz_tick()==1,"periodic maintenance");
+        if(condition()) return;
+        std::this_thread::sleep_for(250ms);
+    } while(std::chrono::steady_clock::now()<end);
+    try {
+        auto v=volume(drive);
+        std::wcerr<<L"Session status: "<<v.status<<L"; handles="<<v.handles<<L"; dirty="<<v.dirty<<std::endl;
+    }catch(...) {}
+    throw std::runtime_error(what);
+}
 void idle(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);o.idleMinutes=1;o.delaySeconds=1;
-    auto drive=mount(archive,o);write(fs::path(drive+L"\\")/L"auto.txt","auto");
-    waitClosed(drive);std::this_thread::sleep_for(2s);require(wz_tick()==1,"automatic writeback");
-    require(!volume(drive).dirty,"automatic writeback persisted");
-    std::this_thread::sleep_for(61s);
-    require(wz_tick()==1&&wz_count()==0,"automatic idle eject");
+    auto original=read(archive);
+    auto drive=mount(archive,o);auto file=fs::path(drive+L"\\")/L"auto.txt";
+    write(file,"auto");
+    HANDLE h=CreateFileW(file.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                         nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"open file during automatic writeback");
+    std::this_thread::sleep_for(2s);
+    require(wz_tick()==1,"maintenance with an open handle");
+    require(volume(drive).dirty&&read(archive)==original,"writeback deferred while handle is open");
+    CloseHandle(h);
+    waitClosed(drive);
+    waitUntil([&]{return !volume(drive).dirty;},30s,"automatic writeback did not complete",drive);
+    require(read(archive)!=original,"automatic writeback changed original");
+    waitUntil([]{return wz_count()==0;},90s,"automatic idle eject did not complete",drive);
     drive=mount(archive,o);require(read(fs::path(drive+L"\\")/L"auto.txt")=="auto","auto commit survived");
     eject(drive);
 }

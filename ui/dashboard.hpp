@@ -357,7 +357,7 @@ class Dashboard {
         associations.Children().Append(systemDefaultsBtn);integrations.Children().Append(associations);
         recoveryBtn=button(L"Open recovery cache",L"Recovery");integrations.Children().Append(recoveryBtn);
         page.Children().Append(card(integrations));
-        ScrollViewer scroll;scroll.Content(page);scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        auto scroll=identify(ScrollViewer{},L"DashboardScroll");scroll.Content(page);scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
         scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);window.Content(scroll);
         mountBtn.Click([this](auto&&,auto&&){browse();});
         hideBtn.Click([this](auto&&,auto&&){hide();});

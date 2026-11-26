@@ -121,7 +121,7 @@ jobs:
         shell: pwsh
         run: |
           ./tests/fixtures.ps1
-          python -m pip install pywinauto==0.6.9
+          python -m pip install pywinauto==0.6.9 Pillow
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -u tests/ui_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
