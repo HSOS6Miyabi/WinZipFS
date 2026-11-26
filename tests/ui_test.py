@@ -122,21 +122,28 @@ def choose_archive(path):
 
 def complete_archive_dialog(path):
     print(f"Choose archive {path.name}", flush=True)
+    handle = wait_for(lambda: user32.FindWindowW("#32770", "WinZipFS - Mount archive"),
+                      "Archive picker did not open", timeout=30)
     win32 = Desktop(backend="win32")
-    def find_dialog():
-        owned = window.child_window(title="WinZipFS - Mount archive", control_type="Window", visible_only=False)
-        if owned.exists(timeout=0.2, retry_interval=0.1):
-            return owned.wrapper_object().handle
-        return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
-                     if w.window_text() == "WinZipFS - Mount archive"), None)
-    handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
-    dialog = desktop.window(handle=handle, visible_only=False)
-    field = dialog.child_window(auto_id="1148", control_type="Edit", visible_only=False)
-    field.wait("exists enabled", timeout=20)
+    def descendants(parent):
+        children = []
+        win32gui.EnumChildWindows(parent, lambda child, _: children.append(child) or True, None)
+        return children
+    def filename_edit():
+        for child in descendants(handle):
+            if win32gui.GetDlgCtrlID(child) == 1148:
+                for field in [child] + descendants(child):
+                    if win32gui.GetClassName(field) == "Edit":
+                        return field
+        return None
+    edit_handle = wait_for(filename_edit, "File name input not found", timeout=20)
+    print("Set native filename", flush=True)
+    field = win32.window(handle=edit_handle).wrapper_object()
     field.set_edit_text(str(path))
-    dialog.child_window(auto_id="1", control_type="Button", visible_only=False).invoke()
+    button = wait_for(lambda: win32gui.GetDlgItem(handle, 1), "Open button missing")
+    print("Confirm native picker", flush=True)
+    win32.window(handle=button).wrapper_object().click_input()
     wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
-
 
 def tray_menu(keys):
     control = user32.FindWindowW("WinZipFS.Control", None)
@@ -244,7 +251,9 @@ def eject_selected():
 
 
 def exit_application():
-    click("Exit")
+    print("Click Exit", flush=True)
+    window.set_focus()
+    ctl("Exit", bring_into_view=True).click_input()
     app.wait_for_process_exit(timeout=60)
 
 
