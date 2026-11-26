@@ -266,6 +266,7 @@ class Dashboard {
         tray.hIcon=custom?icon.hIcon:LoadIconW(nullptr,IDI_APPLICATION);
         wcscpy_s(tray.szTip,L"WinZipFS · Archive drives");
         trayReady=Shell_NotifyIconW(NIM_ADD,&tray)!=FALSE;
+        hideBtn.IsEnabled(trayReady);
         if(custom) DestroyIcon(icon.hIcon);
         if(!trayReady) {ShowWindow(hwnd,SW_SHOW);say(L"Notification area is unavailable; the main window remains open.");}
     }
@@ -314,7 +315,7 @@ class Dashboard {
         header.Children().Append(text(L"Mount compressed files as Windows drives, edit files in place, and save changes when you are ready."));
         auto toolbar=horizontal();
         mountBtn=button(L"Mount archive…",L"Mount");
-        hideBtn=button(L"Minimize to tray",L"Hide");
+        hideBtn=button(L"Minimize to tray",L"Hide");hideBtn.IsEnabled(false);
         exitBtn=button(L"Exit",L"Exit");
         toolbar.Children().Append(mountBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
         header.Children().Append(toolbar);

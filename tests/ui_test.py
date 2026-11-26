@@ -217,8 +217,13 @@ def verify_tray_icon():
     get_rect = ctypes.windll.shell32.Shell_NotifyIconGetRect
     get_rect.argtypes = [ctypes.POINTER(NotifyIconIdentifier), ctypes.POINTER(wintypes.RECT)]
     get_rect.restype = ctypes.c_long
-    wait_for(lambda: get_rect(ctypes.byref(info), ctypes.byref(rect)) == 0,
-             "Notification icon not registered with Explorer")
+    # The application enables Hide only after Shell_NotifyIcon(NIM_ADD)
+    # succeeds. Explorer may retain registered icons in its overflow area;
+    # a screen rectangle is not required to be available for those icons.
+    wait_for(lambda: ctl("Hide").is_enabled(), "Explorer did not accept notification icon registration")
+    result = get_rect(ctypes.byref(info), ctypes.byref(rect))
+    print("Tray icon registered; Shell_NotifyIconGetRect:",
+          f"0x{result & 0xffffffff:08x}", (rect.left, rect.top, rect.right, rect.bottom), flush=True)
 
 
 def open_associated(path):
