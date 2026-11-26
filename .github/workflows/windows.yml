@@ -25,6 +25,11 @@ jobs:
           & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "WZ_VCPKG=$env:RUNNER_TEMP/vcpkg" >> $env:GITHUB_ENV
+      - name: Restore vcpkg binary packages
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: windows-x64-vcpkg-e6d62cc9-${{ hashFiles('vcpkg.json') }}
       - name: Build native core
         shell: pwsh
         run: |
@@ -33,6 +38,12 @@ jobs:
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item 'C:\Program Files\7-Zip\7z.dll' build/Release/
+      - name: Save vcpkg binary packages
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: windows-x64-vcpkg-e6d62cc9-${{ hashFiles('vcpkg.json') }}
       - name: Build WinUI 3
         shell: pwsh
         run: |

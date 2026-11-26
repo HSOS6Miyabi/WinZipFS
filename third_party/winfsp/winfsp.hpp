@@ -27,6 +27,9 @@
 #error this header requires a C++ compiler
 #endif
 
+#include <windows.h>
+#include <winternl.h>
+typedef NTSTATUS *PNTSTATUS;
 #include <winfsp/winfsp.h>
 
 #define FSP_CPP_EXCEPTION_GUARD(...)\
@@ -650,7 +653,7 @@ public:
     NTSTATUS Preflight(PWSTR MountPoint)
     {
         return FspFileSystemPreflight(
-            _VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME,
+            const_cast<PWSTR>(_VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME),
             MountPoint);
     }
     NTSTATUS Mount(PWSTR MountPoint,
@@ -670,7 +673,7 @@ public:
         if (!NT_SUCCESS(Result))
             return Result;
         Result = FspFileSystemCreate(
-            _VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME,
+            const_cast<PWSTR>(_VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME),
             &_VolumeParams, Interface(), &_FileSystemPtr);
         if (!NT_SUCCESS(Result))
             return Result;
@@ -1218,7 +1221,7 @@ public:
         if (0 == _Service)
         {
             FspServiceLog(EVENTLOG_ERROR_TYPE,
-                L"The service cannot be created (Status=%lx).",
+                const_cast<PWSTR>(L"The service cannot be created (Status=%lx)."),
                 STATUS_INSUFFICIENT_RESOURCES);
             return FspWin32FromNtStatus(STATUS_INSUFFICIENT_RESOURCES);
         }
@@ -1228,7 +1231,7 @@ public:
         if (!NT_SUCCESS(Result))
         {
             FspServiceLog(EVENTLOG_ERROR_TYPE,
-                L"The service has failed to run (Status=%lx).",
+                const_cast<PWSTR>(L"The service has failed to run (Status=%lx)."),
                 Result);
             return FspWin32FromNtStatus(Result);
         }

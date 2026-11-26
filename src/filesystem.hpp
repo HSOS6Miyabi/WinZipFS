@@ -821,8 +821,9 @@ NTSTATUS Ptfs::ReadDirectoryEntry(
 
     if (0 == *PContext)
     {
+        WCHAR AllEntries[] = L"*";
         if (0 == Pattern)
-            Pattern = L"*";
+            Pattern = AllEntries;
         PatternLength = (ULONG)wcslen(Pattern);
 
         Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
