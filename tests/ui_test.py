@@ -132,7 +132,8 @@ def complete_archive_dialog(path, title="WinZipFS - Mount archive", confirmation
                      if w.window_text() == title), None)
     handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
     dialog = desktop.window(handle=handle, visible_only=False)
-    field = dialog.child_window(auto_id="1148", control_type="Edit", visible_only=False)
+    field_id = "1001" if title == "WinZipFS - Save archive copy" else "1148"
+    field = dialog.child_window(auto_id=field_id, control_type="Edit", visible_only=False)
     field.wait("exists enabled", timeout=20)
     field.set_edit_text(str(path))
     dialog.child_window(auto_id=confirmation, control_type="Button", visible_only=False).invoke()

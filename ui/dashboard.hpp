@@ -220,8 +220,11 @@ class Dashboard {
             dialog.CloseButtonText(L"Cancel");
             dialog.DefaultButton(ContentDialogButton::Primary);
             dialog.IsPrimaryButtonEnabled(false);
-            password.PasswordChanged([dialog,password](auto&&,auto&&){dialog.IsPrimaryButtonEnabled(!password.Password().empty());});
+            auto token=password.PasswordChanged([dialog](IInspectable const& sender,auto&&){
+                dialog.IsPrimaryButtonEnabled(!sender.as<PasswordBox>().Password().empty());
+            });
             auto result=co_await dialog.ShowAsync();
+            password.PasswordChanged(token);
             std::shared_ptr<SecretText> secret;
             if(result==ContentDialogResult::Primary) secret=std::make_shared<SecretText>(ws(password.Password()));
             password.Password(L"");
@@ -581,6 +584,7 @@ public:
         window.Activate();if(background)hide();
         int recovered=wz_recovery_count();
         if(recovered>0) say(L"Recovered archive sessions are available. Select Recover archive files to save their contents.");
+        else if(recovered<0) say(L"Error: "+coreError());
         timer.Interval(std::chrono::seconds(2));
         timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{return wz_tick()?std::wstring{}:L"Error: "+coreError();},true);});
         timer.Start();

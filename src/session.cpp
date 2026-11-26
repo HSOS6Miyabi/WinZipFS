@@ -57,6 +57,19 @@ inline bool ordinaryDirectory(const fs::path& path) {
     auto attr=GetFileAttributesW(path.c_str());
     return attr!=INVALID_FILE_ATTRIBUTES && (attr&FILE_ATTRIBUTE_DIRECTORY) && !(attr&FILE_ATTRIBUTE_REPARSE_POINT);
 }
+inline bool removeCache(const fs::path& root) noexcept {
+    try {
+        if(!ordinaryDirectory(root)) return false;
+        std::error_code ec;
+        for(const auto& item:fs::recursive_directory_iterator(root,fs::directory_options::skip_permission_denied)) {
+            auto attr=GetFileAttributesW(item.path().c_str());
+            if(attr!=INVALID_FILE_ATTRIBUTES && !(attr&FILE_ATTRIBUTE_REPARSE_POINT) && (attr&FILE_ATTRIBUTE_READONLY))
+                SetFileAttributesW(item.path().c_str(),attr&~FILE_ATTRIBUTE_READONLY);
+        }
+        fs::remove_all(root,ec);
+        return !ec&&!fs::exists(root);
+    } catch(...) {return false;}
+}
 inline void marker(const fs::path& path) {
     std::ofstream out(path,std::ios::binary|std::ios::trunc);
     out<<"1";
@@ -161,13 +174,13 @@ struct Session {
         } catch(...) {
             if(mounted) host.Unmount();
             lease.reset();
-            std::error_code ec;fs::remove_all(cache,ec);throw;
+            removeCache(cache);throw;
         }
     }
     ~Session() {
         if(mounted) host.Unmount();
         lease.reset();
-        if(!ptfs.dirty) { std::error_code ec;fs::remove_all(cache,ec); }
+        if(!ptfs.dirty) { removeCache(cache); }
     }
     void commitFrozen() {
         if(!ptfs.dirty) return;
@@ -324,7 +337,9 @@ inline std::vector<fs::path> recoveries() {
         // Password-protected volumes are read-only. A terminated session cannot
         // have unsaved archive modifications, so remove its decrypted cache.
         if(ordinaryFile(path/L"sensitive")) {
-            lease.reset();fs::remove_all(path,ec);ec.clear();continue;
+            lease.reset();
+            if(!removeCache(path)) throw std::runtime_error("A previous protected archive cache could not be removed: "+path8(path));
+            continue;
         }
         if(validRecovery(path)) result.push_back(path);
     }
@@ -392,7 +407,7 @@ int wz_recovery_discard(const wchar_t* id) {
         auto removed=path.parent_path()/(L"discarded-"+wz::guid());
         if(!MoveFileExW(path.c_str(),removed.c_str(),MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error("Cannot remove the recovery session");
-        wz::fs::remove_all(removed);
+        if(!wz::removeCache(removed)) throw std::runtime_error("Recovery cache could not be completely removed");
     });
 }
 int wz_mount_readonly(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size) {
