@@ -135,7 +135,13 @@ def complete_archive_dialog(path, title="WinZipFS - Mount archive", confirmation
     field_id = "1001" if title == "WinZipFS - Save archive copy" else "1148"
     field = dialog.child_window(auto_id=field_id, control_type="Edit", visible_only=False)
     field.wait("exists enabled", timeout=20)
-    field.set_edit_text(str(path))
+    if title == "WinZipFS - Save archive copy":
+        field.click_input()
+        send_keys("^a")
+        send_keys(str(path), with_spaces=True)
+        send_keys("{TAB}")
+    else:
+        field.set_edit_text(str(path))
     dialog.child_window(auto_id=confirmation, control_type="Button", visible_only=False).invoke()
     wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
 
@@ -488,7 +494,8 @@ def test_safety():
     window.set_focus()
     ctl("SaveCopy", bring_into_view=True).click_input()
     complete_archive_dialog(target, title="WinZipFS - Save archive copy")
-    status_contains("Saved copy")
+    status_contains("Saved copy: " + str(target))
+    wait_for(target.exists, "Saved copy missing")
     with ZipFile(target) as archive:
         assert archive.read("unsaved.txt") == b"safe copy"
     with ZipFile(FIX / "ui.zip") as archive:
@@ -555,7 +562,8 @@ def test_recovery():
     modal_button("Save recovered copy…")
     destination = FIX / "recovery-ui.zip"
     complete_archive_dialog(destination, title="WinZipFS - Save archive copy")
-    status_contains("Recovered copy")
+    status_contains("Recovered copy: " + str(destination))
+    wait_for(destination.exists, "Recovered copy missing")
     with ZipFile(destination) as archive:
         assert archive.read("recovery-ui.txt") == b"recovered UI data"
     click("Recovery")
