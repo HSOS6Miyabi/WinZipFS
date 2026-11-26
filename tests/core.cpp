@@ -297,6 +297,14 @@ void uncMode(fs::path const& fixtures) {
     auto aa=fs::path(a),bb=fs::path(b);
     require(read(aa/L"sample.txt")=="original","direct UNC read creates a session");
     require(volume(a).uncMode&&wz_count()==1,"first lazy session");
+    auto alias=fixtures/L"unc hardlink.zip";
+    fs::create_hard_link(first,alias);
+    auto originalTime=fs::last_write_time(first);
+    fs::last_write_time(first,originalTime+std::chrono::seconds(4));
+    wchar_t aliasDrive[16]{};
+    require(wz_mount(alias.c_str(),&o,aliasDrive,16)==0,"reject hardlink alias after external timestamp change");
+    fs::last_write_time(first,originalTime);
+    fs::remove(alias);
     require(read(bb/L"sample.txt")=="original","second direct UNC read");
     require(wz_count()==2&&GetLogicalDrives()==drives,"concurrent UNC archives no drive letters");
     auto before=read(first);
@@ -330,6 +338,17 @@ void uncMode(fs::path const& fixtures) {
     HANDLE denied=CreateFileW((fs::path(cab)/L"new.txt").c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
     require(denied==INVALID_HANDLE_VALUE,"UNC readonly write rejected");
     waitClosed(cab);require(wz_eject(cab)==1,"close readonly UNC");
+    o.batch=0;o.delaySeconds=1;
+    require(wz_unc_settings(&o,6)==1,"configure automatic writeback and idle expiry");
+    write(aa/L"automatic.txt","automatic UNC save");
+    waitClosed(a);
+    auto closedAt=std::chrono::steady_clock::now();
+    std::this_thread::sleep_until(closedAt+1500ms);
+    require(wz_tick()==1&&wz_count()==1&&!volume(a).dirty,"automatic UNC writeback before expiry");
+    std::this_thread::sleep_until(closedAt+6300ms);
+    require(wz_tick()==1&&wz_count()==0,"writeback does not extend UNC idle lifetime");
+    require(read(aa/L"automatic.txt")=="automatic UNC save","automatic writeback persisted");
+    waitClosed(a);require(wz_eject(a)==1,"release automatic writeback session");
     require(wz_shutdown()==1&&GetLogicalDrives()==drives,"stop UNC namespace");
 }
 int wmain(int argc,wchar_t** argv) {

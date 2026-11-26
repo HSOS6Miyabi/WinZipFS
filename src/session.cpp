@@ -100,10 +100,12 @@ struct Fingerprint {
         BOOL ok=GetFileInformationByHandle(h,&info);CloseHandle(h);
         if(!ok) throw std::runtime_error("Cannot identify original archive");
     }
-    bool operator==(const Fingerprint& b) const {
+    bool sameIdentity(const Fingerprint& b) const {
         return info.dwVolumeSerialNumber==b.info.dwVolumeSerialNumber &&
-          info.nFileIndexHigh==b.info.nFileIndexHigh && info.nFileIndexLow==b.info.nFileIndexLow &&
-          info.nFileSizeHigh==b.info.nFileSizeHigh && info.nFileSizeLow==b.info.nFileSizeLow &&
+          info.nFileIndexHigh==b.info.nFileIndexHigh && info.nFileIndexLow==b.info.nFileIndexLow;
+    }
+    bool operator==(const Fingerprint& b) const {
+        return sameIdentity(b) && info.nFileSizeHigh==b.info.nFileSizeHigh && info.nFileSizeLow==b.info.nFileSizeLow &&
           CompareFileTime(&info.ftLastWriteTime,&b.info.ftLastWriteTime)==0;
     }
 };
@@ -269,7 +271,7 @@ struct Session {
         try {
             commitFrozen();
             if(eject) {if(mounted) host.Unmount();mounted=false;}
-            else {ptfs.Touch();ptfs.closing=false;}
+            else {if(!uncMode)ptfs.Touch();ptfs.closing=false;}
             retryAfter=0;notifiedError.clear();
             if(ptfs.readOnly)status=protectedArchive?L"Read-only · protected":L"Read-only";
             else if(!status.starts_with(L"Saved"))status=L"Saved";
@@ -320,7 +322,7 @@ inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsi
     independentPath(p);
     auto id=Fingerprint(p);
     for(const auto& session:sessions) {
-        if(same(session->original.wstring(),p.wstring())||id==session->fingerprint) {
+        if(same(session->original.wstring(),p.wstring())||id.sameIdentity(session->fingerprint)) {
             if(session->uncMode) throw std::runtime_error("The archive is already open in UNC mode. Close that session before assigning a drive letter.");
             if(ro&&!session->ptfs.readOnly) throw std::runtime_error("The archive is already mounted read/write. Eject it before mounting read-only.");
             copy(mount,size,session->drive);return;

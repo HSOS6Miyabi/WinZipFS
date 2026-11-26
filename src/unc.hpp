@@ -286,7 +286,7 @@ public:
         if(uncStopping)throw std::runtime_error("UNC namespace is stopping");
         if(requested.size()>=WZ_MOUNT_CAPACITY)throw std::runtime_error("UNC archive path is too long");
         Fingerprint id(source);
-        for(auto const& item:sessions) if(same(item->original.wstring(),source.wstring())||id==item->fingerprint) {
+        for(auto const& item:sessions) if(same(item->original.wstring(),source.wstring())||id.sameIdentity(item->fingerprint)) {
             if(!item->uncMode)throw std::runtime_error("Archive is mounted as a drive letter");
             if(!same(item->drive,requested))throw std::runtime_error("Archive already open through another UNC path");
             if(readOnly&&!item->ptfs.readOnly)throw std::runtime_error("Archive is already open read/write");

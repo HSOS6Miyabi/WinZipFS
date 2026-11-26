@@ -115,22 +115,33 @@ def drive_from_details():
                     "Mounted drive missing").group(1)
 
 
+def find_archive_dialog(title="WinZipFS - Mount archive"):
+    win32 = Desktop(backend="win32")
+    owned = window.child_window(title=title, control_type="Window", visible_only=False)
+    if owned.exists(timeout=0.2, retry_interval=0.1):
+        return owned.wrapper_object().handle
+    return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
+                 if w.window_text() == title), None)
+
+
 def choose_archive(path, identifier="Mount"):
     window.set_focus()
-    ctl(identifier, bring_into_view=True).click_input()
+    control = ctl(identifier, bring_into_view=True)
+    assert control.is_enabled(), identifier
+    control.click_input()
+    try:
+        wait_for(find_archive_dialog, "Archive picker did not open after mouse input", timeout=5)
+    except AssertionError:
+        if not find_archive_dialog():
+            window.set_focus()
+            ctl(identifier, bring_into_view=True).set_focus()
+            send_keys("{ENTER}")
     complete_archive_dialog(path)
 
 
 def complete_archive_dialog(path, title="WinZipFS - Mount archive", confirmation="1"):
     print(f"Choose archive {path.name}", flush=True)
-    win32 = Desktop(backend="win32")
-    def find_dialog():
-        owned = window.child_window(title=title, control_type="Window", visible_only=False)
-        if owned.exists(timeout=0.2, retry_interval=0.1):
-            return owned.wrapper_object().handle
-        return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
-                     if w.window_text() == title), None)
-    handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
+    handle = wait_for(lambda: find_archive_dialog(title), "Archive picker did not open", timeout=30)
     dialog = desktop.window(handle=handle, visible_only=False)
     field_id = "1001" if title == "WinZipFS - Save archive copy" else "1148"
     field = dialog.child_window(auto_id=field_id, control_type="Edit", visible_only=False)
@@ -617,6 +628,9 @@ def test_unc():
     wait_closed()
     click("Eject")
     status_contains("Ejected")
+    value("UncSeconds",30)
+    click("UncApply")
+    status_contains("UNC settings saved")
     choose_archive(FIX/"ui.zip","MountUncReadOnly")
     status_contains("Mounted")
     assert not ctl("Flush").is_enabled()
