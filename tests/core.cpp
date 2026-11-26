@@ -249,6 +249,35 @@ void idle(fs::path const& archive) {
     drive=mount(archive,o);require(read(fs::path(drive+L"\\")/L"auto.txt")=="auto","auto commit survived");
     eject(drive);
 }
+void incremental(fs::path const& archive) {
+    std::cout<<"Testing incremental ZIP update"<<std::endl;
+    WzOptions o{};wz_default_options(&o);o.batch=1;o.level=9;o.method=2;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    auto path=root/L"changed.txt";
+    HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"read original timestamp");
+    FILETIME modified{};
+    require(GetFileTime(h,nullptr,nullptr,&modified)!=0,"get original timestamp");
+    CloseHandle(h);
+    write(path,std::string(12288,'B'));
+    h=CreateFileW(path.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"restore file timestamp");
+    require(SetFileTime(h,nullptr,nullptr,&modified)!=0,"restore modified time");
+    CloseHandle(h);
+    waitClosed(drive);
+    require(wz_flush(drive.c_str())==1,"incremental save");
+    require(std::wstring_view(volume(drive).status).find(L"incremental")!=std::wstring_view::npos,"incremental status");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(read(root/L"changed.txt")==std::string(12288,'B'),"same-size timestamp-restored change persisted");
+    require(read(root/L"unchanged.bin")==std::string(1048576,'A'),"unchanged contents");
+    eject(drive);
+    fs::copy_file(archive,archive.parent_path()/L"incremental-before-recompress.zip",fs::copy_options::overwrite_existing);
+    drive=mount(archive,o);waitClosed(drive);
+    require(wz_recompress(drive.c_str())==1,"full recompression");
+    require(std::wstring_view(volume(drive).status).find(L"recompressed")!=std::wstring_view::npos,"recompression status");
+    eject(drive);
+}
 void uncMode(fs::path const& fixtures) {
     std::wcout<<L"Testing UNC on-demand namespace"<<std::endl;
     auto first=fixtures/L"unc first.zip",second=fixtures/L"unc second.7z";
@@ -336,6 +365,7 @@ int wmain(int argc,wchar_t** argv) {
             safety(root/L"safety.zip",root);
             std::cout<<"Testing disk volume idle expiry"<<std::endl;
             idle(root/L"idle.zip");
+            incremental(root/L"incremental.zip");
             uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");

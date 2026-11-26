@@ -40,6 +40,11 @@ from pathlib import Path
 from zipfile import ZipFile
 import sys
 root = Path(sys.argv[1])
+from zipfile import ZIP_STORED, ZIP_DEFLATED
+with ZipFile(root / "incremental.zip", "w") as z:
+    z.writestr("unchanged.bin", b"A" * 1048576, compress_type=ZIP_STORED)
+    z.writestr("changed.txt", b"old" * 4096, compress_type=ZIP_DEFLATED)
+
 
 def zstd_raw(data):
     assert 0 < len(data) < 65792

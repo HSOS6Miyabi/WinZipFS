@@ -55,7 +55,7 @@ class Dashboard {
     Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
            systemDefaultsBtn{nullptr},recoveryBtn{nullptr},hideBtn{nullptr},exitBtn{nullptr};
-    Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},uncApplyBtn{nullptr};
+    Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},uncApplyBtn{nullptr},recompressBtn{nullptr};
     TextBox uncRoot{nullptr},uncSeconds{nullptr};
     ToggleSwitch preferUnc{nullptr};
     shell::UncSettings uncSettings=shell::loadUncSettings();
@@ -133,7 +133,8 @@ class Dashboard {
         details.Text(hs(s));
         openBtn.IsEnabled(r!=nullptr);ejectBtn.IsEnabled(r!=nullptr);
         applyBtn.IsEnabled(r!=nullptr);flushBtn.IsEnabled(r&&!r->readOnly);
-        exportBtn.IsEnabled(r&&!r->protectedArchive);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
+        exportBtn.IsEnabled(r&&!r->protectedArchive);
+        recompressBtn.IsEnabled(r&&!r->readOnly);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
     }
     void refresh() {
         int n=wz_snapshot(nullptr,0);
@@ -375,6 +376,17 @@ class Dashboard {
             return ok?(eject?L"Ejected "+drive:L"Saved "+drive):L"Error: "+coreError();
         });
     }
+    void recompress(std::wstring drive) {
+        if(drive.empty())return;
+        auto id=sessionId(drive);
+        show();
+        if(MessageBoxW(hwnd,L"Recompress the entire archive using its current compression settings? This may take time.",
+                       L"WinZipFS - Recompress archive",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+        queue([drive,id]{
+            if(!stillMounted(drive,id))return std::wstring(L"Error: The selected session is no longer mounted.");
+            return wz_recompress(drive.c_str())?L"Recompressed "+drive:L"Error: "+coreError();
+        });
+    }
     void apply() {
         if(selected.empty()) return;
         try {
@@ -532,7 +544,8 @@ class Dashboard {
         auto protection=horizontal();
         exportBtn=button(L"Save archive copy…",L"SaveCopy");
         discardBtn=button(L"Discard changes and eject…",L"Discard");
-        protection.Children().Append(exportBtn);protection.Children().Append(discardBtn);
+        recompressBtn=button(L"Recompress all…",L"Recompress");
+        protection.Children().Append(exportBtn);protection.Children().Append(discardBtn);protection.Children().Append(recompressBtn);
         volumes.Children().Append(protection);page.Children().Append(card(volumes));
         auto settings=vertical(12);
         settings.Children().Append(text(L"Compression and cache",20,true));
@@ -597,6 +610,7 @@ class Dashboard {
         uncApplyBtn.Click([this](auto&&,auto&&){applyUncSettings();});
         exportBtn.Click([this](auto&&,auto&&){exportCopy(selected);});
         discardBtn.Click([this](auto&&,auto&&){discard(selected);});
+        recompressBtn.Click([this](auto&&,auto&&){recompress(selected);});
         hideBtn.Click([this](auto&&,auto&&){hide();});
         exitBtn.Click([this](auto&&,auto&&){quit();});
         list.SelectionChanged([this](auto&&,auto&&){

@@ -136,6 +136,8 @@ struct Session {
     Fingerprint fingerprint;
     WzOptions options;
     Format format;
+    std::optional<CacheManifest> previous;
+    bool forceRecompress=false;
     Ptfs ptfs;
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
@@ -161,6 +163,7 @@ struct Session {
             if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed while opening");
             if(forceReadOnly) format={};
             ptfs.readOnly=!format.inner;
+            if(incrementalFormat(format)) previous=cacheManifest(root);
             ptfs.label=original.filename().wstring();
             marker(cache/L"ready");
             auto s=root.wstring();
@@ -203,7 +206,11 @@ struct Session {
         bool replacing=false;
         try {
             std::error_code ec;fs::remove(work,ec);
-            pack(lib(),root,tmp,work,format,options);
+            std::optional<CacheManifest> current;
+            if(previous)current=cacheManifest(root);
+            bool incremental=previous.has_value()&&!forceRecompress;
+            if(incremental)packIncremental(lib(),original,root,tmp,format,options,*previous,*current);
+            else pack(lib(),root,tmp,work,format,options);
             HANDLE out=CreateFileW(tmp.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
             if(out==INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot flush new archive");
             BOOL flushed=FlushFileBuffers(out);CloseHandle(out);
@@ -223,10 +230,12 @@ struct Session {
                 throw std::runtime_error("Original archive was replaced concurrently; cached files and replacement backups retained");
             }
             fingerprint=Fingerprint(original);
+            if(current)previous=std::move(current);
+            forceRecompress=false;
             ptfs.dirty=false;
             fs::remove(backup,ec);
             fs::remove(work,ec);
-            status=L"Saved";
+            status=incremental?L"Saved · incremental":L"Saved · recompressed";
         } catch(...) {
             std::error_code ec;
             if(!replacing) fs::remove(tmp,ec);
@@ -260,7 +269,9 @@ struct Session {
             commitFrozen();
             if(eject) {if(mounted) host.Unmount();mounted=false;}
             else {ptfs.Touch();ptfs.closing=false;}
-            retryAfter=0;notifiedError.clear();status=ptfs.readOnly?(protectedArchive?L"Read-only · protected":L"Read-only"):L"Saved";
+            retryAfter=0;notifiedError.clear();
+            if(ptfs.readOnly)status=protectedArchive?L"Read-only · protected":L"Read-only";
+            else if(!status.starts_with(L"Saved"))status=L"Saved";
         } catch(const std::exception& e) {status=wide(e.what());ptfs.closing=false;ptfs.Touch();throw;}
         catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
@@ -527,6 +538,12 @@ int wz_options(const wchar_t* d,const WzOptions* o) {
     });
 }
 int wz_flush(const wchar_t* d) {return wz::call([&]{wz::find(d).save(false);});}
+int wz_recompress(const wchar_t* d) {return wz::call([&]{
+    auto& session=wz::find(d);
+    if(session.ptfs.readOnly)throw std::runtime_error("Read-only archive");
+    if(session.ptfs.handles)throw std::runtime_error("Close files before recompressing");
+    session.forceRecompress=true;session.ptfs.Changed();session.save(false);
+});}
 int wz_eject(const wchar_t* d) {return wz::call([&]{
     auto& s=wz::find(d);s.save(true);
     if(s.uncMode&&wz::unc)wz::unc->releasePath(s.drive);

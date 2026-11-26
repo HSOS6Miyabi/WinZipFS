@@ -42,6 +42,8 @@ Formats are detected by the archive engine. Multi-volume archives, archives with
 
 Files are extracted into a private per-session directory under `%LOCALAPPDATA%\WinZipFS\cache`. Changes are committed only when WinFsp reports that no file handles remain open. In automatic mode, writeback starts after the configured delay; batch mode defers it until explicit Save changes or Eject. Idle eject is disabled by default. Idle eject saves pending changes, including in batch mode.
 
+ZIP and 7z use incremental archive updates: SHA-256 fingerprints detect changes even when file sizes and timestamps are unchanged, and unchanged entries are retained by the compression engine. For solid 7z archives, the engine may need to recompress affected solid blocks. Use **Recompress all** to apply new compression settings to every entry. TAR-family formats use full reconstruction.
+
 A replacement archive is generated beside the original, tested using the 7-Zip engine and checked against the cache file and directory manifest, flushed to storage and then used to replace the original. An external change to the original file causes writeback to stop and retain the cache. During archive generation, opening new handles on the drive temporarily fails. If save fails, the session stays mounted and cached files are retained. The replacement operation creates a backup of the original; if replacement fails, remaining backup and replacement files are retained for recovery. On unexpected process termination, choose Recover archive files to list abandoned sessions, save a separate ZIP or 7z archive, or delete a recovery cache. Active sessions are excluded using exclusive cache locks.
 
 ## Build

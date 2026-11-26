@@ -46,6 +46,7 @@ WZ_API int wz_get(int index, WzVolume* info);
 WZ_API int wz_snapshot(WzVolume* info, unsigned capacity);
 WZ_API int wz_options(const wchar_t* mount, const WzOptions* options);
 WZ_API int wz_flush(const wchar_t* mount);
+WZ_API int wz_recompress(const wchar_t* mount);
 WZ_API int wz_eject(const wchar_t* mount);
 WZ_API int wz_tick(void);
 WZ_API int wz_shutdown(void);

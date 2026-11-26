@@ -84,6 +84,8 @@ jobs:
           ./tests/fixtures.ps1
           & build/Release/core-tests.exe (Resolve-Path artifacts/fixtures) 2>&1 | Tee-Object artifacts/test-results/core-integration.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/verify_incremental.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
