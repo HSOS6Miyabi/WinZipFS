@@ -90,7 +90,7 @@ jobs:
           name: native-integration-test-results
           path: artifacts/test-results/
           if-no-files-found: warn
-  winui-integration:
+  build-ui:
     needs: build-native
     runs-on: windows-2022
     timeout-minutes: 30
@@ -138,32 +138,50 @@ jobs:
           Copy-Item build/Release/7z.dll artifacts/app/
           Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winui-build-x64
+          path: artifacts/app/
+          if-no-files-found: error
+  winui-integration:
+    needs: build-ui
+    runs-on: windows-2022
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [startup, picker, shell, settings, tray-picker, tray]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WinFsp and 7-Zip
+        shell: pwsh
+        run: ./scripts/install-dependencies.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: winui-build-x64
+          path: artifacts/app/
       - name: WinUI and notification area automation
+        timeout-minutes: 4
         shell: pwsh
         run: |
           ./tests/fixtures.ps1
           python -m pip install pywinauto==0.6.9 Pillow
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -u tests/ui_test.py
+          python -u tests/ui_test.py ${{ matrix.suite }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: winui-test-results
+          name: winui-test-results-${{ matrix.suite }}
           path: artifacts/test-results/
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
-        with:
-          name: winui-tested-build
-          path: artifacts/app/
-          if-no-files-found: error
   package:
     needs: [native-integration, winui-integration]
     runs-on: windows-2022
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: winui-tested-build
+          name: winui-build-x64
           path: artifacts/app/
       - uses: actions/upload-artifact@v4
         with:

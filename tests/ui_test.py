@@ -1,5 +1,7 @@
 """Exercise the actual WinUI window and Windows shell integration."""
 import ctypes
+import faulthandler
+import sys
 from ctypes import wintypes
 import struct
 from pathlib import Path
@@ -113,7 +115,8 @@ def drive_from_details():
 
 
 def choose_archive(path):
-    click("Mount")
+    window.set_focus()
+    ctl("Mount", bring_into_view=True).click_input()
     complete_archive_dialog(path)
 
 
@@ -210,7 +213,9 @@ def current_options():
             ctl("Solid").iface_toggle.CurrentToggleState)
 
 
-try:
+
+def start_application():
+    global app, window, main_hwnd
     app = Application(backend="uia").start(f'"{EXE}" --no-explorer')
     window = app.window(title="WinZipFS")
     window.wait("exists ready", timeout=90)
@@ -219,6 +224,31 @@ try:
     rect = win32gui.GetWindowRect(main_hwnd)
     assert rect[0] >= work[0] and rect[1] >= work[1] and rect[2] <= work[2] and rect[3] <= work[3], (rect, work)
     window = app.window(handle=main_hwnd, visible_only=False)
+    verify_tray_icon()
+
+
+def launch_archive(path):
+    subprocess.run([str(EXE), str(path)], timeout=30, check=True)
+    status_contains("Mounted")
+    select_volume(path.name)
+    drive = drive_from_details()
+    return Path(drive + "\\")
+
+
+def eject_selected():
+    root = Path(drive_from_details() + "\\")
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    wait_for(lambda: not root.exists(), "Drive remains mounted")
+
+
+def exit_application():
+    click("Exit")
+    app.wait_for_process_exit(timeout=60)
+
+
+def test_startup():
     verify_tray_icon()
     for name in ("DashboardScroll", "Mount", "Hide", "Exit", "Status", "Summary", "Volumes", "Details",
                  "Open", "Flush", "Eject", "Batch", "Delay", "Idle", "Level", "Method", "Threads",
@@ -242,6 +272,20 @@ try:
     wait_closed()
     click("Eject")
     status_contains("Ejected")
+    exit_application()
+
+
+def test_picker():
+    choose_archive(FIX / "ui.zip")
+    status_contains("Mounted")
+    drive = drive_from_details()
+    root = Path(drive + "\\")
+    assert (root / "sample.txt").read_text() == "original"
+    eject_selected()
+    exit_application()
+
+
+def test_shell():
     click("Register")
     status_contains("registered")
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\WinZipFS\Capabilities\FileAssociations") as key:
@@ -252,10 +296,29 @@ try:
             assert winreg.QueryValueEx(key, ext)[0] == "WinZipFS.Archive", ext
     click("DefaultApps")
     wait_for(lambda: "Windows default apps" in status(), "Default apps command did not report a result")
-    choose_archive(FIX / "ui.zip")
+    open_associated(FIX / "readonly.cab")
     status_contains("Mounted")
-    drive = drive_from_details()
-    root = Path(drive + "\\")
+    select_volume("readonly.cab")
+    readonly_drive = drive_from_details()
+    assert "Read-only" in ctl("Details").window_text()
+    assert not ctl("Flush").is_enabled()
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    wait_for(lambda: not Path(readonly_drive + "\\").exists(), "Read-only drive still mounted")
+    click("Unregister")
+    status_contains("removed")
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\WinZipFS.Archive")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("ProgID was not removed")
+    exit_application()
+
+
+def test_settings():
+    root = launch_archive(FIX / "ui.zip")
     assert (root / "sample.txt").read_text() == "original"
     toggle("Batch")
     value("Delay", 8)
@@ -272,26 +335,14 @@ try:
     click("Apply")
     status_contains("Error:")
     value("Delay", 8)
-    open_associated(FIX / "readonly.cab")
+    subprocess.run([str(EXE), str(FIX / "readonly.cab")], timeout=30, check=True)
     status_contains("Mounted")
     select_volume("readonly.cab")
-    readonly_drive = drive_from_details()
     assert "Read-only" in ctl("Details").window_text()
     assert not ctl("Flush").is_enabled()
-    wait_closed()
-    click("Eject")
-    status_contains("Ejected")
-    wait_for(lambda: not Path(readonly_drive + "\\").exists(), "Read-only drive still mounted")
+    eject_selected()
     select_volume("ui.zip")
     assert current_options() == (1, 8, 2, 4, 2, 2, 0)
-    click("Unregister")
-    status_contains("removed")
-    try:
-        winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\WinZipFS.Archive")
-    except FileNotFoundError:
-        pass
-    else:
-        raise AssertionError("ProgID was not removed")
     (root / "ui.txt").write_text("WinUI writeback", encoding="utf-8")
     wait_closed()
     click("Flush")
@@ -325,9 +376,23 @@ try:
     click("Eject")
     status_contains("Ejected")
     wait_for(lambda: not root.exists(), "Ejected drive still exists")
+    exit_application()
+    start_application()
+    assert current_options() == (0, 3, 0, 1, 0, 1, 1)
+    exit_application()
+
+
+def test_tray_picker():
     tray_menu("{HOME}{DOWN}{ENTER}")
     complete_archive_dialog(FIX / "tray.7z")
     status_contains("Mounted")
+    assert (Path(drive_from_details() + "\\") / "sample.txt").read_text() == "original"
+    eject_selected()
+    exit_application()
+
+
+def test_tray():
+    launch_archive(FIX / "tray.7z")
     tray_drive = drive_from_details()
     tray_root = Path(tray_drive + "\\")
     user32.PostMessageW(main_hwnd, 0x0010, 0, 0)
@@ -339,7 +404,7 @@ try:
     time.sleep(1)
     close_explorer()
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{ENTER}")
-    assert current_options() == (0, 3, 0, 1, 0, 1, 1)
+    assert current_options() == (0, 5, 0, 3, 0, 0, 1)
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{ENTER}")
     status_contains("Batch mode updated")
     assert ctl("Batch").iface_toggle.CurrentToggleState == 1
@@ -354,37 +419,52 @@ try:
     result = subprocess.run([str(seven_zip), "x", "-so", str(FIX / "tray.7z"), "tray.txt"],
                             check=True, capture_output=True)
     assert result.stdout == b"tray writeback"
-    click("Exit")
-    app.wait_for_process_exit(timeout=60)
-    app = Application(backend="uia").start(f'"{EXE}" --no-explorer')
-    window = app.window(title="WinZipFS")
-    window.wait("exists ready", timeout=90)
-    assert current_options() == (0, 3, 0, 1, 0, 1, 1)
-    verify_tray_icon()
     tray_menu("{END}{ENTER}")
     app.wait_for_process_exit(timeout=60)
-    (RESULTS / "ui.txt").write_text("WinUI and tray automation passed\n", encoding="utf-8")
-except Exception:
-    (RESULTS / "ui.txt").write_text(traceback.format_exc(), encoding="utf-8")
+
+
+SUITES = {
+    "startup": test_startup,
+    "picker": test_picker,
+    "shell": test_shell,
+    "settings": test_settings,
+    "tray-picker": test_tray_picker,
+    "tray": test_tray,
+}
+
+
+if __name__ == "__main__":
+    suite = sys.argv[1] if len(sys.argv) == 2 else None
+    if suite not in SUITES:
+        raise SystemExit("Usage: python tests/ui_test.py " + "|".join(SUITES))
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(90, repeat=True)
     try:
-        for top in Desktop(backend="win32").windows():
-            print("Window:", top.handle, top.process_id(), top.class_name(), repr(top.window_text()), flush=True)
+        start_application()
+        SUITES[suite]()
+        (RESULTS / (suite + ".txt")).write_text(suite + " passed\n", encoding="utf-8")
     except Exception:
-        pass
-    try:
-        if window is not None:
-            window.capture_as_image().save(RESULTS / "ui-failure.png")
-    except Exception:
-        pass
-    try:
-        if window is not None:
-            import contextlib
-            with (RESULTS / "ui-controls.txt").open("w", encoding="utf-8") as out:
-                with contextlib.redirect_stdout(out):
-                    window.print_control_identifiers()
-    except Exception:
-        pass
-    raise
-finally:
-    if app is not None and app.is_process_running():
-        app.kill()
+        (RESULTS / (suite + ".txt")).write_text(traceback.format_exc(), encoding="utf-8")
+        try:
+            for top in Desktop(backend="win32").windows():
+                print("Window:", top.handle, top.process_id(), top.class_name(), repr(top.window_text()), flush=True)
+        except Exception:
+            pass
+        try:
+            if window is not None:
+                window.capture_as_image().save(RESULTS / (suite + "-failure.png"))
+        except Exception:
+            pass
+        try:
+            if window is not None:
+                import contextlib
+                with (RESULTS / (suite + "-controls.txt")).open("w", encoding="utf-8") as out:
+                    with contextlib.redirect_stdout(out):
+                        window.print_control_identifiers()
+        except Exception:
+            pass
+        raise
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        if app is not None and app.is_process_running():
+            app.kill()
