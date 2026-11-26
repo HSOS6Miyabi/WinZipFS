@@ -119,6 +119,9 @@ def complete_archive_dialog(path):
     print(f"Choose archive {path.name}", flush=True)
     win32 = Desktop(backend="win32")
     def find_dialog():
+        owned = window.child_window(title="WinZipFS - Mount archive", control_type="Window", visible_only=False)
+        if owned.exists(timeout=0.2, retry_interval=0.1):
+            return owned.wrapper_object().handle
         return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
                      if w.window_text() == "WinZipFS - Mount archive"), None)
     handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
@@ -126,7 +129,7 @@ def complete_archive_dialog(path):
     field = dialog.child_window(auto_id="1148", control_type="Edit", visible_only=False)
     field.wait("exists enabled", timeout=20)
     field.set_edit_text(str(path))
-    dialog.child_window(title="Open", control_type="Button", visible_only=False).invoke()
+    dialog.child_window(auto_id="1", control_type="Button", visible_only=False).invoke()
     wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
 
 
