@@ -169,6 +169,7 @@ int wz_mount(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size
             if(wz::same(s->original.wstring(),p.wstring())) {wz::copy(mount,size,s->drive);return;}
             if(wz::Fingerprint(p)==s->fingerprint) {wz::copy(mount,size,s->drive);return;}
         }
+        if(!NT_SUCCESS(FspLoad(nullptr))) throw std::runtime_error("WinFsp is not installed");
         auto s=std::make_unique<wz::Session>(p,*o);
         wz::copy(mount,size,s->drive);wz::sessions.push_back(std::move(s));
     });

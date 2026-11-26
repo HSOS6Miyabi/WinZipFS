@@ -218,7 +218,7 @@ NTSTATUS Ptfs::SetPath(PWSTR Path)
         return NtStatusFromWin32(GetLastError());
 
     Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
-    if (0 == Length)
+    if (0 == Length || Length >= FULLPATH_SIZE - 1)
     {
         LastError = GetLastError();
         CloseHandle(Handle);
@@ -237,6 +237,7 @@ NTSTATUS Ptfs::SetPath(PWSTR Path)
     CloseHandle(Handle);
 
     Length++;
+    delete[] _Path;
     _Path = new WCHAR[Length];
     memcpy(_Path, FullPath, Length * sizeof(WCHAR));
 
@@ -324,7 +325,7 @@ NTSTATUS Ptfs::GetSecurityByName(
         return STATUS_OBJECT_NAME_INVALID;
 
     Handle = CreateFileW(FullPath,
-        FILE_READ_ATTRIBUTES | READ_CONTROL, 0, 0,
+        FILE_READ_ATTRIBUTES | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
     if (INVALID_HANDLE_VALUE == Handle)
     {
