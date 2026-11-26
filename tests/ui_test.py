@@ -111,18 +111,23 @@ def drive_from_details():
 
 
 def choose_archive(path):
-    window.set_focus()
-    ctl("Mount", bring_into_view=True).click_input()
+    click("Mount")
     complete_archive_dialog(path)
 
 
 def complete_archive_dialog(path):
-    dialog = desktop.window(title="Open", control_type="Window")
-    dialog.wait("exists ready", timeout=30)
-    field = dialog.child_window(auto_id="1148", control_type="Edit")
-    field.wait("exists ready", timeout=20)
+    print(f"Choose archive {path.name}", flush=True)
+    win32 = Desktop(backend="win32")
+    def find_dialog():
+        return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
+                     if w.window_text() == "WinZipFS - Mount archive"), None)
+    handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
+    dialog = desktop.window(handle=handle, visible_only=False)
+    field = dialog.child_window(auto_id="1148", control_type="Edit", visible_only=False)
+    field.wait("exists enabled", timeout=20)
     field.set_edit_text(str(path))
-    dialog.child_window(title="Open", control_type="Button").click_input()
+    dialog.child_window(title="Open", control_type="Button", visible_only=False).invoke()
+    wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
 
 
 def tray_menu(keys):
@@ -353,6 +358,11 @@ try:
     (RESULTS / "ui.txt").write_text("WinUI and tray automation passed\n", encoding="utf-8")
 except Exception:
     (RESULTS / "ui.txt").write_text(traceback.format_exc(), encoding="utf-8")
+    try:
+        for top in Desktop(backend="win32").windows():
+            print("Window:", top.handle, top.process_id(), top.class_name(), repr(top.window_text()), flush=True)
+    except Exception:
+        pass
     try:
         if window is not None:
             window.capture_as_image().save(RESULTS / "ui-failure.png")

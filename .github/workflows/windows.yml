@@ -105,24 +105,39 @@ jobs:
           name: native-build-x64
           path: build/Release/
       - uses: actions/cache/restore@v4
+        id: ui-output-cache
+        with:
+          path: artifacts/app/
+          key: winui-output-windows2022-x64-v1-${{ hashFiles('ui/**', 'src/api.h', 'CMakeLists.txt') }}
+      - uses: actions/cache/restore@v4
         id: nuget-cache
+        if: steps.ui-output-cache.outputs.cache-hit != 'true'
         with:
           path: ~/.nuget/packages
           key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
       - name: Build WinUI 3
+        if: steps.ui-output-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           msbuild ui/WinZipFS.vcxproj /restore /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/cache/save@v4
+        if: success() && steps.ui-output-cache.outputs.cache-hit != 'true'
+        with:
+          path: artifacts/app/
+          key: ${{ steps.ui-output-cache.outputs.cache-primary-key }}
+      - uses: actions/cache/save@v4
+        if: success() && steps.ui-output-cache.outputs.cache-hit != 'true' && steps.nuget-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.nuget/packages
+          key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
+      - name: Assemble application
+        shell: pwsh
+        run: |
           Copy-Item build/Release/WinZipFSCore.dll artifacts/app/
           Copy-Item build/Release/7z.dll artifacts/app/
           Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
-      - uses: actions/cache/save@v4
-        if: ${{ !cancelled() && steps.nuget-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: ~/.nuget/packages
-          key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
       - name: WinUI and notification area automation
         shell: pwsh
         run: |

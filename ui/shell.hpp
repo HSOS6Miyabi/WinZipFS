@@ -111,7 +111,8 @@ inline std::wstring pick(HWND owner) {
     std::wstring pattern;
     for(auto const& e:extensions()) {if(!pattern.empty()) pattern+=L";";pattern+=L"*"+e;}
     COMDLG_FILTERSPEC filters[]={{L"Archive files",pattern.c_str()},{L"All files",L"*.*"}};
-    dialog->SetFileTypes(2,filters);
+    winrt::check_hresult(dialog->SetTitle(L"WinZipFS - Mount archive"));
+    winrt::check_hresult(dialog->SetFileTypes(2,filters));
     auto result=dialog->Show(owner);
     if(result==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return {};
     winrt::check_hresult(result);
