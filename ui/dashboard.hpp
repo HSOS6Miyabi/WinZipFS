@@ -136,9 +136,12 @@ class Dashboard {
         exportBtn.IsEnabled(r&&!r->protectedArchive);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
     }
     void refresh() {
-        std::vector<WzVolume> updated;
-        int n=wz_count();
-        for(int i=0;i<n;++i) {WzVolume v{};if(wz_get(i,&v)) updated.push_back(v);}
+        int n=wz_snapshot(nullptr,0);
+        if(n<0)return;
+        std::vector<WzVolume> updated(static_cast<size_t>(n));
+        int actual=wz_snapshot(updated.data(),static_cast<unsigned>(updated.size()));
+        if(actual<0||actual>n)return;
+        updated.resize(static_cast<size_t>(actual));
         bool changed=rows.size()!=updated.size();
         if(!changed) for(size_t i=0;i<rows.size();++i) if(rowText(rows[i])!=rowText(updated[i])||std::wstring_view(rows[i].sessionId)!=updated[i].sessionId) {changed=true;break;}
         auto previous=selected;
@@ -248,10 +251,10 @@ class Dashboard {
         auto opt=defaults;bool explorer=!noExplorer;
         auto retryPath=path;
         queue([path=std::move(path),opt,explorer,readOnly,uncMode,secret=std::move(secret)] {
-            wchar_t drive[32768]{};
-            int ok=uncMode?wz_mount_unc(path.c_str(),&opt,readOnly,secret?secret->value.c_str():nullptr,drive,32768):
-                   secret?wz_mount_password(path.c_str(),&opt,secret->value.c_str(),drive,32768):
-                   readOnly?wz_mount_readonly(path.c_str(),&opt,drive,32768):wz_mount(path.c_str(),&opt,drive,32768);
+            wchar_t drive[WZ_MOUNT_CAPACITY]{};
+            int ok=uncMode?wz_mount_unc(path.c_str(),&opt,readOnly,secret?secret->value.c_str():nullptr,drive,WZ_MOUNT_CAPACITY):
+                   secret?wz_mount_password(path.c_str(),&opt,secret->value.c_str(),drive,WZ_MOUNT_CAPACITY):
+                   readOnly?wz_mount_readonly(path.c_str(),&opt,drive,WZ_MOUNT_CAPACITY):wz_mount(path.c_str(),&opt,drive,WZ_MOUNT_CAPACITY);
             if(!ok) return L"Error: "+coreError();
             std::wstring result=L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
             if(explorer&&!shell::open(std::wstring(drive)+L"\\")) result+=L" (Explorer could not be opened)";

@@ -71,7 +71,8 @@ inline fs::path uncSourcePath(const fs::path& input) {
 class UncFs final : public Fsp::FileSystemBase {
     Ptfs shadow;
     Fsp::FileSystemHost host;
-    fs::path shadowPath;
+    fs::path shadowPath,namespacePath;
+    std::unique_ptr<FileHandle> lease;
     std::vector<BYTE> user;
     DWORD session=0,level=0;
     bool started=false;
@@ -240,9 +241,12 @@ public:
             throw std::runtime_error("Cannot construct UNC namespace name");
         address=L"\\\\WinZipFS\\Archives-"+std::wstring(sid)+L"-"+std::to_wstring(session);
         LocalFree(sid);
-        shadowPath=local()/(L"namespace-"+guid());
+        namespacePath=local()/(L"namespace-"+guid());
+        shadowPath=namespacePath/L"files";
         fs::create_directories(shadowPath);
         try {
+            lease=lockCache(namespacePath);
+            if(!lease)throw std::runtime_error("Cannot lock UNC namespace directory");
             shadow.readOnly=true;shadow.label=L"WinZipFS archives";
             auto path=shadowPath.wstring();
             if(!NT_SUCCESS(shadow.SetPath(path.data())))throw std::runtime_error("Cannot initialize UNC namespace");
@@ -250,15 +254,29 @@ public:
             NTSTATUS status=host.Mount(noMount);
             if(!NT_SUCCESS(status))throw std::runtime_error("Cannot register UNC namespace (NTSTATUS "+std::to_string(static_cast<unsigned>(status))+")");
             started=true;
-        }catch(...){removeCache(shadowPath);throw;}
+        }catch(...){lease.reset();removeCache(namespacePath);throw;}
     }
-    ~UncFs() {if(started)host.Unmount();removeCache(shadowPath);}
+    ~UncFs() {if(started)host.Unmount();lease.reset();removeCache(namespacePath);}
+    void releasePath(std::wstring const& path) noexcept {
+        try {
+            if(!prefixPath(path,address)||path.size()<=address.size()+1)return;
+            auto item=shadowPath/path.substr(address.size()+1);
+            std::error_code ec;
+            while(item!=shadowPath && inside(item,shadowPath)) {
+                if(!fs::remove(item,ec)||ec)break;
+                item=item.parent_path();
+            }
+        }catch(...){}
+    }
     std::wstring addressFor(fs::path const& source) const {
         auto path=source.wstring();
-        return address+L"\\"+std::wstring(1,towupper(path[0]))+path.substr(2);
+        auto result=address+L"\\"+std::wstring(1,towupper(path[0]))+path.substr(2);
+        if(result.size()>=WZ_MOUNT_CAPACITY)throw std::runtime_error("UNC archive path is too long");
+        return result;
     }
     Session& openSession(fs::path const& source,std::wstring const& requested,WzOptions const& options,bool readOnly,const wchar_t* password) {
         if(uncStopping)throw std::runtime_error("UNC namespace is stopping");
+        if(requested.size()>=WZ_MOUNT_CAPACITY)throw std::runtime_error("UNC archive path is too long");
         Fingerprint id(source);
         for(auto const& item:sessions) if(same(item->original.wstring(),source.wstring())||id==item->fingerprint) {
             if(!item->uncMode)throw std::runtime_error("Archive is mounted as a drive letter");

@@ -12,8 +12,9 @@ extern "C" {
 typedef struct WzOptions {
     int batch, delaySeconds, idleMinutes, level, method, threads, solid;
 } WzOptions;
+enum { WZ_MOUNT_CAPACITY = 4096 };
 typedef struct WzVolume {
-    wchar_t archive[32768], mount[32768], status[512];
+    wchar_t archive[32768], mount[WZ_MOUNT_CAPACITY], status[512];
     int readOnly, dirty, protectedArchive, uncMode;
     unsigned handles;
     wchar_t sessionId[64];
@@ -41,6 +42,8 @@ WZ_API int wz_unc_path(const wchar_t* archive, wchar_t* path, unsigned size);
 WZ_API int wz_mount_unc(const wchar_t* archive, const WzOptions* options, int readOnly, const wchar_t* password, wchar_t* path, unsigned size);
 WZ_API int wz_count(void);
 WZ_API int wz_get(int index, WzVolume* info);
+// Returns the required count, or -1 while a background operation holds the session lock.
+WZ_API int wz_snapshot(WzVolume* info, unsigned capacity);
 WZ_API int wz_options(const wchar_t* mount, const WzOptions* options);
 WZ_API int wz_flush(const wchar_t* mount);
 WZ_API int wz_eject(const wchar_t* mount);

@@ -344,7 +344,13 @@ inline std::vector<fs::path> recoveries() {
     std::error_code ec;
     for(const auto& entry:fs::directory_iterator(directory,ec)) {
         auto path=entry.path();
-        if(!validId(path.filename().wstring())||!ordinaryDirectory(path)) continue;
+        auto name=path.filename().wstring();
+        if(name.starts_with(L"namespace-")&&validId(std::wstring_view(name).substr(10))&&ordinaryDirectory(path)) {
+            auto lease=lockCache(path);
+            if(lease){lease.reset();removeCache(path);}
+            continue;
+        }
+        if(!validId(name)||!ordinaryDirectory(path)) continue;
         auto lease=lockCache(path);
         if(!lease) continue;
         // Password-protected volumes are read-only. A terminated session cannot
@@ -438,6 +444,7 @@ int wz_save_copy(const wchar_t* drive,const wchar_t* destination) {
 int wz_discard(const wchar_t* drive) {
     return wz::call([&]{
         auto& session=wz::find(drive);session.discard();
+        if(session.uncMode&&wz::unc)wz::unc->releasePath(session.drive);
         std::erase_if(wz::sessions,[&](const auto& p){return p.get()==&session;});
     });
 }
@@ -482,16 +489,29 @@ int wz_mount_unc(const wchar_t* path,const WzOptions* options,int readOnly,const
     });
 }
 int wz_count() {std::lock_guard lock(wz::manager);return (int)wz::sessions.size();}
+static void fillVolume(wz::Session& s,WzVolume* out) {
+    *out={};
+    wz::copy(out->archive,32768,s.original.wstring());
+    wz::copy(out->mount,WZ_MOUNT_CAPACITY,s.drive);
+    out->uncMode=s.uncMode;
+    wz::copy(out->status,512,s.status);
+    out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;
+    out->handles=s.ptfs.handles;out->options=s.options;
+    wz::copy(out->sessionId,64,s.cache.filename().wstring());
+}
 int wz_get(int i,WzVolume* out) {
     return wz::call([&]{
         if(!out||i<0||i>=int(wz::sessions.size())) throw std::runtime_error("Invalid volume index");
-        auto& s=*wz::sessions[i]; *out={};
-        wz::copy(out->archive,32768,s.original.wstring());wz::copy(out->mount,32768,s.drive);
-        out->uncMode=s.uncMode;
-        wz::copy(out->status,512,s.status);
-        out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;out->handles=s.ptfs.handles;out->options=s.options;
-        wz::copy(out->sessionId,64,s.cache.filename().wstring());
+        fillVolume(*wz::sessions[i],out);
     });
+}
+int wz_snapshot(WzVolume* out,unsigned capacity) {
+    std::unique_lock lock(wz::manager,std::try_to_lock);
+    if(!lock.owns_lock())return -1;
+    int count=static_cast<int>(wz::sessions.size());
+    if(out&&capacity>=static_cast<unsigned>(count))
+        for(int i=0;i<count;++i) fillVolume(*wz::sessions[i],out+i);
+    return count;
 }
 int wz_options(const wchar_t* d,const WzOptions* o) {
     return wz::call([&]{
@@ -509,6 +529,7 @@ int wz_options(const wchar_t* d,const WzOptions* o) {
 int wz_flush(const wchar_t* d) {return wz::call([&]{wz::find(d).save(false);});}
 int wz_eject(const wchar_t* d) {return wz::call([&]{
     auto& s=wz::find(d);s.save(true);
+    if(s.uncMode&&wz::unc)wz::unc->releasePath(s.drive);
     std::erase_if(wz::sessions,[&](const auto& p){return p.get()==&s;});
 });}
 int wz_tick() {return wz::call([&]{
@@ -520,7 +541,9 @@ int wz_tick() {return wz::call([&]{
             if(now<s.retryAfter) {++i;continue;}
             if((s.uncMode && s.idle(now,1000ULL*wz::uncCacheSeconds)) ||
                (!s.uncMode && s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes))) {
-                s.save(true);i=wz::sessions.erase(i);continue;
+                s.save(true);
+                if(s.uncMode&&wz::unc)wz::unc->releasePath(s.drive);
+                i=wz::sessions.erase(i);continue;
             }
             if(!s.options.batch&&s.ptfs.dirty&&s.idle(now,1000ULL*s.options.delaySeconds)) s.save(false);
         } catch(const std::exception& e) {

@@ -257,10 +257,10 @@ void uncMode(fs::path const& fixtures) {
     WzOptions o{};wz_default_options(&o);o.batch=1;
     DWORD drives=GetLogicalDrives();
     require(wz_unc_start(&o,2)==1,"start UNC namespace");
-    wchar_t root[32768]{},a[32768]{},b[32768]{},cab[32768]{};
-    require(wz_unc_root(root,32768)==1,"get UNC root");
-    require(wz_unc_path(first.c_str(),a,32768)==1&&wz_unc_path(second.c_str(),b,32768)==1,"generate UNC addresses");
-    require(wz_unc_path((fixtures/L"readonly.cab").c_str(),cab,32768)==1,"generate readonly UNC");
+    wchar_t root[WZ_MOUNT_CAPACITY]{},a[WZ_MOUNT_CAPACITY]{},b[WZ_MOUNT_CAPACITY]{},cab[WZ_MOUNT_CAPACITY]{};
+    require(wz_unc_root(root,WZ_MOUNT_CAPACITY)==1,"get UNC root");
+    require(wz_unc_path(first.c_str(),a,WZ_MOUNT_CAPACITY)==1&&wz_unc_path(second.c_str(),b,WZ_MOUNT_CAPACITY)==1,"generate UNC addresses");
+    require(wz_unc_path((fixtures/L"readonly.cab").c_str(),cab,WZ_MOUNT_CAPACITY)==1,"generate readonly UNC");
     require(wz_count()==0&&GetLogicalDrives()==drives,"no eager archive session or drive letter");
     require(std::wstring_view(a).starts_with(L"\\\\WinZipFS\\"),"UNC address");
     auto aa=fs::path(a),bb=fs::path(b);
@@ -325,15 +325,20 @@ int wmain(int argc,wchar_t** argv) {
                 readonly(root/name);
             }
             fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
+            std::cout<<"Testing external conflict"<<std::endl;
             conflict(root/L"conflict.zip");
+            std::cout<<"Testing password-protected archives"<<std::endl;
             password(root/L"encrypted.zip");password(root/L"encrypted.7z");
+            std::cout<<"Testing recovery after termination"<<std::endl;
             recovery(root/L"ui.zip",root/L"recovered.zip");
             fs::copy_file(root/L"ui.zip",root/L"safety.zip",fs::copy_options::overwrite_existing);
+            std::cout<<"Testing safety operations"<<std::endl;
             safety(root/L"safety.zip",root);
+            std::cout<<"Testing disk volume idle expiry"<<std::endl;
             idle(root/L"idle.zip");
             uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");
         std::cout<<"Native tests passed\n";return 0;
-    }catch(std::exception const& e) {std::cerr<<e.what()<<"\n";wz_shutdown();return 1;}
+    }catch(std::exception const& e) {std::cout<<"FAILED: "<<e.what()<<std::endl;wz_shutdown();return 1;}
 }
