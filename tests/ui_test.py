@@ -14,8 +14,7 @@ import win32api
 import win32gui
 from zipfile import ZipFile, ZIP_STORED
 
-from pywinauto import Application, Desktop
-from pywinauto.keyboard import send_keys
+from pywinauto import Application, Desktop, mouse
 
 ROOT = Path.cwd()
 EXE = ROOT / "artifacts/app/WinZipFS.exe"
@@ -138,14 +137,53 @@ def complete_archive_dialog(path):
     wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
 
 
-def tray_menu(keys):
+def popup_windows():
+    return Desktop(backend="win32").windows(process=app.process, class_name="#32768", visible_only=True)
+
+
+def popup_item(label):
+    # Read the native popup's actual labels and item rectangles. The popup is
+    # owned by WinZipFS, so unrelated system menus are never selected.
+    get_menu = user32.SendMessageTimeoutW
+    get_menu.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t,
+                         wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    get_menu.restype = ctypes.c_ssize_t
+    user32.GetMenuItemCount.argtypes = [wintypes.HMENU]
+    user32.GetMenuItemCount.restype = ctypes.c_int
+    user32.GetMenuStringW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.LPWSTR, ctypes.c_int, wintypes.UINT]
+    user32.GetMenuStringW.restype = ctypes.c_int
+    user32.GetMenuItemRect.argtypes = [wintypes.HWND, wintypes.HMENU, wintypes.UINT, ctypes.POINTER(wintypes.RECT)]
+    user32.GetMenuItemRect.restype = wintypes.BOOL
+    for popup in popup_windows():
+        menu = ctypes.c_size_t()
+        if not get_menu(popup.handle, 0x01E1, 0, 0, 2, 1000, ctypes.byref(menu)) or not menu.value:
+            continue
+        for index in range(user32.GetMenuItemCount(menu.value)):
+            name = ctypes.create_unicode_buffer(512)
+            user32.GetMenuStringW(menu.value, index, name, len(name), 0x400)  # MF_BYPOSITION
+            if name.value != label:
+                continue
+            rect = wintypes.RECT()
+            if user32.GetMenuItemRect(None, menu.value, index, ctypes.byref(rect)) and rect.right > rect.left:
+                return ((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+    return None
+
+
+def tray_menu(*labels):
+    print("Tray menu:", " > ".join(labels), flush=True)
     control = user32.FindWindowW("WinZipFS.Control", None)
     assert control, "Notification area callback window missing"
-    user32.PostMessageW(control, 0x8001, 1, 0x0205)
-    wait_for(lambda: user32.FindWindowW("#32768", None), "Notification menu did not open")
-    send_keys(keys, pause=0.2)
-    wait_for(lambda: not user32.FindWindowW("#32768", None), "Notification menu did not close")
-
+    # Use the registered callback to open the real native popup, then perform
+    # mouse selection on its displayed items rather than relying on keyboard focus.
+    assert user32.PostMessageW(control, 0x8001, 1, 0x0205)
+    wait_for(popup_windows, "Notification menu did not open", timeout=15)
+    for label in labels[:-1]:
+        point = wait_for(lambda: popup_item(label), f"Menu item unavailable: {label}", timeout=15)
+        mouse.move(coords=point)
+        time.sleep(0.6)
+    point = wait_for(lambda: popup_item(labels[-1]), f"Menu item unavailable: {labels[-1]}", timeout=15)
+    mouse.click(coords=point)
+    wait_for(lambda: not popup_windows(), "Notification menu did not close", timeout=15)
 
 def close_explorer():
     command = ("$shell=New-Object -ComObject Shell.Application; "
@@ -385,7 +423,7 @@ def test_settings():
 
 
 def test_tray_picker():
-    tray_menu("{HOME}{DOWN}{ENTER}")
+    tray_menu("Mount archive…")
     complete_archive_dialog(FIX / "tray.7z")
     status_contains("Mounted")
     assert (Path(drive_from_details() + "\\") / "sample.txt").read_text() == "original"
@@ -399,29 +437,29 @@ def test_tray():
     tray_root = Path(tray_drive + "\\")
     user32.PostMessageW(main_hwnd, 0x0010, 0, 0)
     wait_for(lambda: not user32.IsWindowVisible(main_hwnd), "Window close did not hide")
-    tray_menu("{HOME}{ENTER}")
+    tray_menu("Open WinZipFS")
     wait_for(lambda: user32.IsWindowVisible(main_hwnd), "Tray Open action failed")
-    tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{ENTER}")
+    tray_menu(tray_drive + "  tray.7z", "Open drive")
     status_contains("Opened ")
     time.sleep(1)
     close_explorer()
-    tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{ENTER}")
+    tray_menu(tray_drive + "  tray.7z", "Compression and cache settings")
     assert current_options() == (0, 5, 0, 3, 0, 0, 1)
-    tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{ENTER}")
+    tray_menu(tray_drive + "  tray.7z", "Batch write mode")
     status_contains("Batch mode updated")
     assert ctl("Batch").iface_toggle.CurrentToggleState == 1
     (tray_root / "tray.txt").write_text("tray writeback", encoding="utf-8")
     wait_closed()
-    tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{ENTER}")
+    tray_menu(tray_drive + "  tray.7z", "Save changes")
     status_contains("Saved")
-    tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{DOWN}{ENTER}")
+    tray_menu(tray_drive + "  tray.7z", "Eject")
     status_contains("Ejected")
     wait_for(lambda: not tray_root.exists(), "Tray eject failed")
     seven_zip = Path(r"C:\Program Files\7-Zip\7z.exe")
     result = subprocess.run([str(seven_zip), "x", "-so", str(FIX / "tray.7z"), "tray.txt"],
                             check=True, capture_output=True)
     assert result.stdout == b"tray writeback"
-    tray_menu("{END}{ENTER}")
+    tray_menu("Exit")
     app.wait_for_process_exit(timeout=60)
 
 
