@@ -505,7 +505,7 @@ def test_safety():
         ctl("Discard", bring_into_view=True).click_input()
         dialog = Desktop(backend="win32").window(title="WinZipFS - Discard changes", class_name="#32770")
         dialog.wait("exists ready", timeout=20)
-        dialog.child_window(title="Yes" if confirm else "No", class_name="Button").click_input()
+        dialog.child_window(control_id=6 if confirm else 7, class_name="Button").click_input()
     discard(False)
     assert (root / "unsaved.txt").read_text() == "safe copy"
     wait_closed()
@@ -571,7 +571,7 @@ def test_recovery():
     modal_button("Delete recovery cache…")
     dialog = Desktop(backend="win32").window(title="WinZipFS - Delete recovery cache", class_name="#32770")
     dialog.wait("exists ready", timeout=20)
-    dialog.child_window(title="Yes", class_name="Button").click_input()
+    dialog.child_window(control_id=6, class_name="Button").click_input()
     status_contains("Recovery cache removed")
     click("Recovery")
     status_contains("No abandoned archive sessions")
