@@ -6,12 +6,11 @@ on:
 permissions:
   contents: read
 jobs:
-  windows-x64:
+  build-native:
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: microsoft/setup-msbuild@v2
       - name: Install WinFsp and 7-Zip
         shell: pwsh
         run: ./scripts/install-dependencies.ps1
@@ -21,17 +20,17 @@ jobs:
           git init "$env:RUNNER_TEMP/vcpkg"
           git -C "$env:RUNNER_TEMP/vcpkg" remote add origin https://github.com/microsoft/vcpkg.git
           git -C "$env:RUNNER_TEMP/vcpkg" fetch --depth 1 origin e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C "$env:RUNNER_TEMP/vcpkg" checkout --detach FETCH_HEAD
           & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "WZ_VCPKG=$env:RUNNER_TEMP/vcpkg" >> $env:GITHUB_ENV
-      - name: Restore vcpkg binary packages
-        uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v4
+        id: vcpkg-cache
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: windows-x64-vcpkg-e6d62cc9-${{ hashFiles('vcpkg.json') }}
       - name: Build native core
-        id: core-build
         shell: pwsh
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:WZ_VCPKG/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
@@ -39,53 +38,112 @@ jobs:
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item 'C:\Program Files\7-Zip\7z.dll' build/Release/
-      - name: Save vcpkg binary packages
-        if: always()
-        uses: actions/cache/save@v4
+          Copy-Item 'C:\Program Files\7-Zip\License.txt' build/Release/7-Zip-License.txt
+          Copy-Item build/vcpkg_installed/x64-windows/share/bit7z/copyright build/Release/bit7z-License.txt
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: windows-x64-vcpkg-e6d62cc9-${{ hashFiles('vcpkg.json') }}
       - name: Native API tests
-        if: ${{ !cancelled() && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-build-x64
+          path: |
+            build/Release/WinZipFSCore.dll
+            build/Release/WinZipFSCore.lib
+            build/Release/core-tests.exe
+            build/Release/7z.dll
+            build/Release/*-License.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-api-test-results
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+  native-integration:
+    needs: build-native
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WinFsp and 7-Zip
+        shell: pwsh
+        run: ./scripts/install-dependencies.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-build-x64
+          path: build/Release/
       - name: Real WinFsp volume integration tests
-        id: integration
-        if: ${{ !cancelled() && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: |
           New-Item artifacts/test-results -ItemType Directory -Force | Out-Null
           ./tests/fixtures.ps1
           & build/Release/core-tests.exe (Resolve-Path artifacts/fixtures) 2>&1 | Tee-Object artifacts/test-results/core-integration.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-integration-test-results
+          path: artifacts/test-results/
+          if-no-files-found: warn
+  winui-integration:
+    needs: build-native
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Install WinFsp and 7-Zip
+        shell: pwsh
+        run: ./scripts/install-dependencies.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-build-x64
+          path: build/Release/
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: winui-nuget-x64-${{ hashFiles('ui/WinZipFS.vcxproj') }}
       - name: Build WinUI 3
-        id: ui-build
-        if: ${{ !cancelled() && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: |
           msbuild ui/WinZipFS.vcxproj /restore /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item build/Release/WinZipFSCore.dll artifacts/app/
-          Copy-Item 'C:\Program Files\7-Zip\7z.dll' artifacts/app/
-          Copy-Item 'C:\Program Files\7-Zip\License.txt' artifacts/app/7-Zip-License.txt
+          Copy-Item build/Release/7z.dll artifacts/app/
+          Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
-          Get-ChildItem build/vcpkg_installed/x64-windows/share/bit7z/copyright | Copy-Item -Destination artifacts/app/bit7z-License.txt
       - name: WinUI and notification area automation
-        if: ${{ !cancelled() && steps.ui-build.outcome == 'success' && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: |
+          ./tests/fixtures.ps1
           python -m pip install pywinauto==0.6.9
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tests/ui_test.py
+          python -u tests/ui_test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-x64-test-results
-          path: |
-            artifacts/test-results/
-            build/Testing/Temporary/LastTest.log
+          name: winui-test-results
+          path: artifacts/test-results/
           if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winui-tested-build
+          path: artifacts/app/
+          if-no-files-found: error
+  package:
+    needs: [native-integration, winui-integration]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: winui-tested-build
+          path: artifacts/app/
       - uses: actions/upload-artifact@v4
         with:
           name: WinZipFS-windows-x64
