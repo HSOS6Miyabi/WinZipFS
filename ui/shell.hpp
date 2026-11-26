@@ -103,6 +103,25 @@ inline bool open(std::wstring const& path) {
     if(SUCCEEDED(apartment)) CoUninitialize();
     return reinterpret_cast<INT_PTR>(result)>32;
 }
+inline std::wstring pickSave(HWND owner,std::wstring const& suggested) {
+    winrt::com_ptr<IFileSaveDialog> dialog;
+    winrt::check_hresult(CoCreateInstance(CLSID_FileSaveDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(dialog.put())));
+    FILEOPENDIALOGOPTIONS options{};
+    winrt::check_hresult(dialog->GetOptions(&options));
+    winrt::check_hresult(dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_OVERWRITEPROMPT));
+    COMDLG_FILTERSPEC filters[]={{L"ZIP archive",L"*.zip"},{L"7-Zip archive",L"*.7z"}};
+    winrt::check_hresult(dialog->SetFileTypes(2,filters));
+    winrt::check_hresult(dialog->SetDefaultExtension(L"zip"));
+    winrt::check_hresult(dialog->SetTitle(L"WinZipFS - Save archive copy"));
+    winrt::check_hresult(dialog->SetFileName(suggested.c_str()));
+    auto result=dialog->Show(owner);
+    if(result==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return {};
+    winrt::check_hresult(result);
+    winrt::com_ptr<IShellItem> item;
+    winrt::check_hresult(dialog->GetResult(item.put()));
+    PWSTR name=nullptr;winrt::check_hresult(item->GetDisplayName(SIGDN_FILESYSPATH,&name));
+    std::wstring value(name);CoTaskMemFree(name);return value;
+}
 inline std::wstring pick(HWND owner) {
     winrt::com_ptr<IFileOpenDialog> dialog;
     winrt::check_hresult(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(dialog.put())));

@@ -113,27 +113,27 @@ def drive_from_details():
                     "Mounted drive missing").group(1)
 
 
-def choose_archive(path):
+def choose_archive(path, identifier="Mount"):
     window.set_focus()
-    ctl("Mount", bring_into_view=True).click_input()
+    ctl(identifier, bring_into_view=True).click_input()
     complete_archive_dialog(path)
 
 
-def complete_archive_dialog(path):
+def complete_archive_dialog(path, title="WinZipFS - Mount archive", confirmation="1"):
     print(f"Choose archive {path.name}", flush=True)
     win32 = Desktop(backend="win32")
     def find_dialog():
-        owned = window.child_window(title="WinZipFS - Mount archive", control_type="Window", visible_only=False)
+        owned = window.child_window(title=title, control_type="Window", visible_only=False)
         if owned.exists(timeout=0.2, retry_interval=0.1):
             return owned.wrapper_object().handle
         return next((w.handle for w in win32.windows(process=app.process, class_name="#32770")
-                     if w.window_text() == "WinZipFS - Mount archive"), None)
+                     if w.window_text() == title), None)
     handle = wait_for(find_dialog, "Archive picker did not open", timeout=30)
     dialog = desktop.window(handle=handle, visible_only=False)
     field = dialog.child_window(auto_id="1148", control_type="Edit", visible_only=False)
     field.wait("exists enabled", timeout=20)
     field.set_edit_text(str(path))
-    dialog.child_window(auto_id="1", control_type="Button", visible_only=False).invoke()
+    dialog.child_window(auto_id=confirmation, control_type="Button", visible_only=False).invoke()
     wait_for(lambda: not user32.IsWindowVisible(handle), "Archive picker did not close", timeout=30)
 
 
@@ -468,8 +468,50 @@ def test_tray():
     app.wait_for_process_exit(timeout=60)
 
 
+def test_safety():
+    choose_archive(FIX / "ui.zip", "MountReadOnly")
+    status_contains("Mounted")
+    root = Path(drive_from_details() + "\\")
+    assert "Read-only" in ctl("Details").window_text()
+    assert not ctl("Flush").is_enabled()
+    assert not ctl("Discard").is_enabled()
+    eject_selected()
+    root = launch_archive(FIX / "ui.zip")
+    toggle("Batch")
+    click("Apply")
+    status_contains("Settings updated")
+    (root / "unsaved.txt").write_text("safe copy", encoding="utf-8")
+    wait_closed()
+    wait_for(lambda: ctl("Discard").is_enabled(), "Pending edits not reflected")
+    target = FIX / "saved-copy.zip"
+    window.set_focus()
+    ctl("SaveCopy", bring_into_view=True).click_input()
+    complete_archive_dialog(target, title="WinZipFS - Save archive copy")
+    status_contains("Saved copy")
+    with ZipFile(target) as archive:
+        assert archive.read("unsaved.txt") == b"safe copy"
+    with ZipFile(FIX / "ui.zip") as archive:
+        assert "unsaved.txt" not in archive.namelist()
+    def discard(confirm):
+        window.set_focus()
+        ctl("Discard", bring_into_view=True).click_input()
+        dialog = Desktop(backend="win32").window(title="WinZipFS - Discard changes", class_name="#32770")
+        dialog.wait("exists ready", timeout=20)
+        dialog.child_window(title="Yes" if confirm else "No", class_name="Button").click_input()
+    discard(False)
+    assert (root / "unsaved.txt").read_text() == "safe copy"
+    wait_closed()
+    discard(True)
+    status_contains("Discarded changes")
+    wait_for(lambda: not root.exists(), "Discarded drive remains mounted")
+    with ZipFile(FIX / "ui.zip") as archive:
+        assert "unsaved.txt" not in archive.namelist()
+    exit_application()
+
+
 SUITES = {
     "startup": test_startup,
+    "safety": test_safety,
     "picker": test_picker,
     "shell": test_shell,
     "settings": test_settings,

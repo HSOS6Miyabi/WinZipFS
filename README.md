@@ -4,11 +4,12 @@ WinZipFS mounts archives as Windows drives using WinFsp, with a native C++20 cor
 
 ## Features
 
-- Mount several archives simultaneously; open the drive in File Explorer.
+- Mount several archives simultaneously, including in an explicitly selected read-only mode; open the drive in File Explorer.
+- Save a separate ZIP or 7z copy of the current cached files without changing the original. Discard pending changes only after confirmation.
 - Modify, create, rename and remove files on writable volumes.
 - Cache changes locally; save automatically after a period without open handles, or enable batch mode and explicitly save or eject.
 - Configure compression level, method, thread count, solid compression, writeback delay and idle eject timeout for individual mounted archives.
-- Manage archives from the notification area. Closing the main window hides it; Exit saves and ejects all mounted archives.
+- Manage archives from the notification area, including read-only mounting, exporting a copy and discarding unsaved changes. Closing the main window hides it; Exit saves and ejects all mounted archives.
 - Register common archive extensions in Windows Settings. Choose WinZipFS as the default app for the extensions you want to open by double-clicking.
 
 ### Format support

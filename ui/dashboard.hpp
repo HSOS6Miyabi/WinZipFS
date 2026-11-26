@@ -52,7 +52,7 @@ class Dashboard {
     ListView list{nullptr};
     TextBlock summary{nullptr},details{nullptr},message{nullptr};
     ProgressRing progress{nullptr};
-    Button mountBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
+    Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
            systemDefaultsBtn{nullptr},recoveryBtn{nullptr},hideBtn{nullptr},exitBtn{nullptr};
     ToggleSwitch batch{nullptr},solid{nullptr};
@@ -103,6 +103,18 @@ class Dashboard {
         return {batch.IsOn()?1:0,checkedNumber(delay,1,3600),checkedNumber(idle,0,1440),levels[l],m,
                 checkedNumber(threads,0,256),solid.IsOn()?1:0};
     }
+    std::wstring sessionId(std::wstring_view drive) const {
+        for(auto const& row:rows) if(drive==row.mount) return row.sessionId;
+        return {};
+    }
+    static bool stillMounted(std::wstring const& drive,std::wstring const& id) {
+        if(id.empty()) return false;
+        for(int i=0;i<wz_count();++i) {
+            WzVolume row{};
+            if(wz_get(i,&row)&&drive==row.mount&&id==row.sessionId) return true;
+        }
+        return false;
+    }
     void updateDetails() {
         auto r=current();
         std::wstring s=r?std::wstring(r->archive)+L"\n"+r->mount+L"   ·   Open handles: "+std::to_wstring(r->handles)+
@@ -111,15 +123,23 @@ class Dashboard {
         details.Text(hs(s));
         openBtn.IsEnabled(r!=nullptr);ejectBtn.IsEnabled(r!=nullptr);
         applyBtn.IsEnabled(r!=nullptr);flushBtn.IsEnabled(r&&!r->readOnly);
+        exportBtn.IsEnabled(r!=nullptr);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
     }
     void refresh() {
         std::vector<WzVolume> updated;
         int n=wz_count();
         for(int i=0;i<n;++i) {WzVolume v{};if(wz_get(i,&v)) updated.push_back(v);}
         bool changed=rows.size()!=updated.size();
-        if(!changed) for(size_t i=0;i<rows.size();++i) if(rowText(rows[i])!=rowText(updated[i])) {changed=true;break;}
+        if(!changed) for(size_t i=0;i<rows.size();++i) if(rowText(rows[i])!=rowText(updated[i])||std::wstring_view(rows[i].sessionId)!=updated[i].sessionId) {changed=true;break;}
         auto previous=selected;
         auto prior=current()?current()->options:defaults;
+        auto priorId=current()?std::wstring(current()->sessionId):L"";
+        if(updated.size()>rows.size()) {
+            auto fresh=std::find_if(updated.rbegin(),updated.rend(),[&](auto const& v){
+                return std::none_of(rows.begin(),rows.end(),[&](auto const& old){return std::wstring_view(v.sessionId)==old.sessionId;});
+            });
+            if(fresh!=updated.rend()) previous=fresh->mount;
+        }
         rows=std::move(updated);
         if(changed) {
             rebuilding=true;
@@ -134,7 +154,7 @@ class Dashboard {
             rebuilding=false;
         }
         auto next=current()?current()->options:defaults;
-        if(previous!=selected||prior.batch!=next.batch||prior.delaySeconds!=next.delaySeconds||
+        if(priorId!=(current()?std::wstring(current()->sessionId):L"")||previous!=selected||prior.batch!=next.batch||prior.delaySeconds!=next.delaySeconds||
            prior.idleMinutes!=next.idleMinutes||prior.level!=next.level||prior.method!=next.method||
            prior.threads!=next.threads||prior.solid!=next.solid) load(next);
         summary.Text(hs(std::to_wstring(rows.size())+L" mounted  ·  "+
@@ -172,24 +192,53 @@ class Dashboard {
     void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false) {
         jobs.push_back({std::move(action),quiet,exit});startNext();
     }
-    void mountPath(std::wstring path) {
+    void mountPath(std::wstring path,bool readOnly=false) {
         if(path.empty()) return;
         auto opt=defaults;bool explorer=!noExplorer;
-        queue([path=std::move(path),opt,explorer] {
+        queue([path=std::move(path),opt,explorer,readOnly] {
             wchar_t drive[16]{};
-            if(!wz_mount(path.c_str(),&opt,drive,16)) return L"Error: "+coreError();
+            if(!(readOnly?wz_mount_readonly(path.c_str(),&opt,drive,16):wz_mount(path.c_str(),&opt,drive,16))) return L"Error: "+coreError();
             std::wstring result=L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
             if(explorer&&!shell::open(std::wstring(drive)+L"\\")) result+=L" (Explorer could not be opened)";
             return result;
         });
     }
-    void browse() {
-        try {auto p=shell::pick(hwnd);if(!p.empty())mountPath(std::move(p));}
+    void browse(bool readOnly=false) {
+        try {auto p=shell::pick(hwnd);if(!p.empty())mountPath(std::move(p),readOnly);}
         catch(hresult_error const& e){say(L"Error: "+ws(e.message()));}
+    }
+    void exportCopy(std::wstring drive) {
+        if(drive.empty()) return;
+        auto id=sessionId(drive);
+        try {
+            std::wstring suggested=L"Archive copy.zip";
+            for(auto const& row:rows) if(drive==row.mount)
+                suggested=std::filesystem::path(row.archive).stem().wstring()+L" - copy.zip";
+            show();
+            auto destination=shell::pickSave(hwnd,suggested);
+            if(destination.empty()) return;
+            queue([drive,id,destination] {
+                if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
+                return wz_save_copy(drive.c_str(),destination.c_str())?L"Saved copy: "+destination:L"Error: "+coreError();
+            });
+        }catch(hresult_error const& e){say(L"Error: "+ws(e.message()));}
+    }
+    void discard(std::wstring drive) {
+        if(drive.empty()) return;
+        auto id=sessionId(drive);
+        show();
+        if(MessageBoxW(hwnd,L"Discard all unsaved changes and eject this archive? The original archive will remain unchanged.",
+                       L"WinZipFS - Discard changes",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES) return;
+        queue([drive,id] {
+            if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
+            return wz_discard(drive.c_str())?L"Discarded changes and ejected "+drive:L"Error: "+coreError();
+        });
     }
     void save(std::wstring drive,bool eject) {
         if(drive.empty()) return;
-        queue([drive=std::move(drive),eject]{
+        auto id=sessionId(drive);
+        queue([drive=std::move(drive),eject,id]{
+            if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
             int ok=eject?wz_eject(drive.c_str()):wz_flush(drive.c_str());
             return ok?(eject?L"Ejected "+drive:L"Saved "+drive):L"Error: "+coreError();
         });
@@ -197,8 +246,11 @@ class Dashboard {
     void apply() {
         if(selected.empty()) return;
         try {
-            auto o=readOptions();auto drive=selected;
-            queue([drive,o] {return wz_options(drive.c_str(),&o)?L"Settings updated for "+drive:L"Error: "+coreError();});
+            auto o=readOptions();auto drive=selected;auto id=sessionId(drive);
+            queue([drive,o,id] {
+                if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
+                return wz_options(drive.c_str(),&o)?L"Settings updated for "+drive:L"Error: "+coreError();
+            });
         }catch(...){say(L"Error: Check numeric ranges and compression settings.");}
     }
     void saveDefaults() {
@@ -234,20 +286,26 @@ class Dashboard {
         };
         add(root,L"Open WinZipFS",[this]{show();});
         add(root,L"Mount archive…",[this]{show();browse();});
+        add(root,L"Mount read-only…",[this]{show();browse(true);});
         AppendMenuW(root,MF_SEPARATOR,0,nullptr);
         if(rows.empty()) AppendMenuW(root,MF_STRING|MF_GRAYED,0,L"No mounted archives");
         for(auto const& r:rows) {
             auto drive=std::wstring(r.mount);
-            auto opt=r.options;bool readOnly=r.readOnly!=0;
+            auto opt=r.options;bool readOnly=r.readOnly!=0;auto id=std::wstring(r.sessionId);
             HMENU sub=CreatePopupMenu();
             add(sub,L"Open drive",[this,drive]{openDrive(drive);});
             add(sub,L"Compression and cache settings",[this,drive]{selectDrive(drive);});
-            add(sub,L"Batch write mode",[this,drive,opt]() mutable {
+            add(sub,L"Batch write mode",[this,drive,opt,id]() mutable {
                 opt.batch=!opt.batch;
-                queue([drive,opt]{return wz_options(drive.c_str(),&opt)?L"Batch mode updated":L"Error: "+coreError();});
+                queue([drive,opt,id]{
+                    if(!stillMounted(drive,id)) return std::wstring(L"Error: The selected session is no longer mounted.");
+                    return wz_options(drive.c_str(),&opt)?L"Batch mode updated":L"Error: "+coreError();
+                });
             },MF_STRING|(opt.batch?MF_CHECKED:MF_UNCHECKED)|(readOnly?MF_GRAYED:0));
             add(sub,L"Save changes",[this,drive]{save(drive,false);},MF_STRING|(readOnly?MF_GRAYED:0));
             add(sub,L"Eject",[this,drive]{save(drive,true);});
+            add(sub,L"Save archive copy…",[this,drive]{exportCopy(drive);});
+            add(sub,L"Discard changes and eject…",[this,drive]{discard(drive);},MF_STRING|(!readOnly&&r.dirty?0:MF_GRAYED));
             auto title=drive+L"  "+std::filesystem::path(r.archive).filename().wstring();
             AppendMenuW(root,MF_POPUP,reinterpret_cast<UINT_PTR>(sub),title.c_str());
         }
@@ -315,9 +373,10 @@ class Dashboard {
         header.Children().Append(text(L"Mount compressed files as Windows drives, edit files in place, and save changes when you are ready."));
         auto toolbar=horizontal();
         mountBtn=button(L"Mount archive…",L"Mount");
+        readOnlyBtn=button(L"Mount read-only…",L"MountReadOnly");
         hideBtn=button(L"Minimize to tray",L"Hide");hideBtn.IsEnabled(false);
         exitBtn=button(L"Exit",L"Exit");
-        toolbar.Children().Append(mountBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
+        toolbar.Children().Append(mountBtn);toolbar.Children().Append(readOnlyBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
         header.Children().Append(toolbar);
         auto activity=horizontal();
         progress=identify(ProgressRing{},L"Progress");progress.Width(20);progress.Height(20);progress.IsActive(false);
@@ -333,7 +392,12 @@ class Dashboard {
         auto actions=horizontal();
         openBtn=button(L"Open drive",L"Open");flushBtn=button(L"Save changes",L"Flush");ejectBtn=button(L"Eject",L"Eject");
         actions.Children().Append(openBtn);actions.Children().Append(flushBtn);actions.Children().Append(ejectBtn);
-        volumes.Children().Append(actions);page.Children().Append(card(volumes));
+        volumes.Children().Append(actions);
+        auto protection=horizontal();
+        exportBtn=button(L"Save archive copy…",L"SaveCopy");
+        discardBtn=button(L"Discard changes and eject…",L"Discard");
+        protection.Children().Append(exportBtn);protection.Children().Append(discardBtn);
+        volumes.Children().Append(protection);page.Children().Append(card(volumes));
         auto settings=vertical(12);
         settings.Children().Append(text(L"Compression and cache",20,true));
         settings.Children().Append(text(L"Apply settings to the selected archive, or save them as defaults for future mounts."));
@@ -369,6 +433,9 @@ class Dashboard {
         Grid::SetRow(header,0);layout.Children().Append(header);
         Grid::SetRow(scroll,1);layout.Children().Append(scroll);window.Content(layout);
         mountBtn.Click([this](auto&&,auto&&){browse();});
+        readOnlyBtn.Click([this](auto&&,auto&&){browse(true);});
+        exportBtn.Click([this](auto&&,auto&&){exportCopy(selected);});
+        discardBtn.Click([this](auto&&,auto&&){discard(selected);});
         hideBtn.Click([this](auto&&,auto&&){hide();});
         exitBtn.Click([this](auto&&,auto&&){quit();});
         list.SelectionChanged([this](auto&&,auto&&){
@@ -422,7 +489,7 @@ public:
         }
         window.Activate();if(background)hide();
         timer.Interval(std::chrono::seconds(2));
-        timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{wz_tick();return std::wstring{};},true);});
+        timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{return wz_tick()?std::wstring{}:L"Error: "+coreError();},true);});
         timer.Start();
         for(auto const& arg:args) {
             if(arg==L"--register") {try{shell::registerAssociations();}catch(...){say(L"Error: Cannot register archive types.");}}

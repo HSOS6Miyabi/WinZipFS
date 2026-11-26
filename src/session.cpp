@@ -81,6 +81,8 @@ struct Session {
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
     bool mounted=false;
+    unsigned long long retryAfter=0;
+    std::wstring notifiedError;
     Session(const fs::path& p,const WzOptions& o,bool forceReadOnly):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
         checkOptions(o);
         cache=local()/guid(); root=cache/L"files";
@@ -200,6 +202,7 @@ struct Session {
             commitFrozen();
             if(eject) {host.Unmount();mounted=false;}
             else {ptfs.Touch();ptfs.closing=false;}
+            retryAfter=0;notifiedError.clear();status=ptfs.readOnly?L"Read-only":L"Saved";
         } catch(const std::exception& e) {status=wide(e.what());ptfs.closing=false;ptfs.Touch();throw;}
         catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
@@ -284,6 +287,7 @@ int wz_get(int i,WzVolume* out) {
         wz::copy(out->archive,32768,s.original.wstring());wz::copy(out->mount,16,s.drive);
         wz::copy(out->status,512,s.status);
         out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->handles=s.ptfs.handles;out->options=s.options;
+        wz::copy(out->sessionId,64,s.cache.filename().wstring());
     });
 }
 int wz_options(const wchar_t* d,const WzOptions* o) {
@@ -306,14 +310,24 @@ int wz_eject(const wchar_t* d) {return wz::call([&]{
 });}
 int wz_tick() {return wz::call([&]{
     auto now=GetTickCount64();
+    std::wstring failures;
     for(auto i=wz::sessions.begin();i!=wz::sessions.end();) {
         auto& s=**i;
         try {
+            if(now<s.retryAfter) {++i;continue;}
             if(s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes)) {s.save(true);i=wz::sessions.erase(i);continue;}
             if(!s.options.batch&&s.ptfs.dirty&&s.idle(now,1000ULL*s.options.delaySeconds)) s.save(false);
-        } catch(const std::exception& e) {s.status=wz::wide(e.what());}
+        } catch(const std::exception& e) {
+            s.status=wz::wide(e.what());s.retryAfter=GetTickCount64()+30000;
+            if(s.notifiedError!=s.status) {
+                s.notifiedError=s.status;
+                if(!failures.empty()) failures+=L"; ";
+                failures+=s.drive+L" "+s.status;
+            }
+        }
         ++i;
     }
+    if(!failures.empty()) throw std::runtime_error(wz::utf8(failures));
 });}
 int wz_shutdown() {return wz::call([&]{
     while(!wz::sessions.empty()) {wz::sessions.back()->save(true);wz::sessions.pop_back();}

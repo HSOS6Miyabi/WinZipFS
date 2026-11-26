@@ -16,6 +16,7 @@ typedef struct WzVolume {
     wchar_t archive[32768], mount[16], status[512];
     int readOnly, dirty;
     unsigned handles;
+    wchar_t sessionId[64];
     WzOptions options;
 } WzVolume;
 WZ_API int wz_mount(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
