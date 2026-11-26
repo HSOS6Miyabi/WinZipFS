@@ -126,7 +126,8 @@ struct Session {
         }
     }
     bool idle(unsigned long long now,unsigned long long delay) const {
-        return ptfs.handles==0 && now-static_cast<unsigned long long>(ptfs.lastActivity.load())>=delay;
+        auto last=static_cast<unsigned long long>(ptfs.lastActivity.load());
+        return ptfs.handles==0 && now>=last && now-last>=delay;
     }
     void freeze() {
         std::lock_guard lock(ptfs.gate);
@@ -207,8 +208,7 @@ int wz_tick() {return wz::call([&]{
     for(auto i=wz::sessions.begin();i!=wz::sessions.end();) {
         auto& s=**i;
         try {
-            if(s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes) &&
-                !(s.options.batch && s.ptfs.dirty)) {s.save(true);i=wz::sessions.erase(i);continue;}
+            if(s.options.idleMinutes && s.idle(now,60000ULL*s.options.idleMinutes)) {s.save(true);i=wz::sessions.erase(i);continue;}
             if(!s.options.batch&&s.ptfs.dirty&&s.idle(now,1000ULL*s.options.delaySeconds)) s.save(false);
         } catch(const std::exception& e) {s.status=wz::wide(e.what());}
         ++i;

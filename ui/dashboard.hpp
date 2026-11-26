@@ -14,7 +14,7 @@ inline hstring hs(std::wstring_view s) { return hstring(s); }
 inline std::wstring ws(hstring const& s) { return std::wstring(s.c_str(),s.size()); }
 inline TextBlock text(std::wstring_view value,double size=14,bool title=false) {
     TextBlock t;t.Text(hs(value));t.FontSize(size);t.TextWrapping(TextWrapping::Wrap);
-    if(title) t.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+    if(title) t.FontWeight(Windows::UI::Text::FontWeight{600});
     return t;
 }
 template<class T> T identify(T value,std::wstring_view id) {

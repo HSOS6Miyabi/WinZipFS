@@ -21,7 +21,7 @@ Formats are detected by the archive engine. Multi-volume archives, archives with
 
 ### Writeback and recovery
 
-Files are extracted into a private per-session directory under `%LOCALAPPDATA%\WinZipFS\cache`. Changes are committed only when WinFsp reports that no file handles remain open. In automatic mode, writeback starts after the configured delay; batch mode defers it until explicit Save changes or Eject. Idle eject is disabled by default. Dirty batch sessions are kept mounted until explicitly saved.
+Files are extracted into a private per-session directory under `%LOCALAPPDATA%\WinZipFS\cache`. Changes are committed only when WinFsp reports that no file handles remain open. In automatic mode, writeback starts after the configured delay; batch mode defers it until explicit Save changes or Eject. Idle eject is disabled by default. Idle eject saves pending changes, including in batch mode.
 
 A replacement archive is generated beside the original, tested using the 7-Zip engine, flushed to storage and then used to replace the original. An external change to the original file causes writeback to stop and retain the cache. During archive generation, opening new handles on the drive temporarily fails. If save fails, the session stays mounted and cached files are retained. On unexpected process termination, use Open recovery cache to inspect session directories and their archive.txt manifests.
 

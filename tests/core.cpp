@@ -1,13 +1,127 @@
 #include "../src/api.h"
+#include <windows.h>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
-int main() {
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <chrono>
+#include <thread>
+namespace fs=std::filesystem;
+using namespace std::chrono_literals;
+void require(bool condition,const char* what) {
+    if(!condition) {
+        wchar_t error[512]{};wz_error(error,512);
+        std::wcerr<<error<<L"\n";
+        throw std::runtime_error(what);
+    }
+}
+std::string read(fs::path const& path) {
+    std::ifstream in(path,std::ios::binary);
+    require(bool(in),"open for reading");
+    return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};
+}
+void write(fs::path const& path,std::string value) {
+    std::ofstream out(path,std::ios::binary|std::ios::trunc);
+    out<<value;out.close();require(bool(out),"write file");
+}
+std::wstring mount(fs::path const& archive,WzOptions o) {
+    wchar_t drive[16]{};
+    require(wz_mount(archive.c_str(),&o,drive,16)==1,"mount");
+    return drive;
+}
+WzVolume volume(std::wstring const& drive) {
+    for(int i=0;i<wz_count();++i) {
+        WzVolume v{};if(wz_get(i,&v)&&drive==v.mount)return v;
+    }
+    throw std::runtime_error("volume not found");
+}
+void waitClosed(std::wstring const& drive) {
+    for(int i=0;i<300;++i) {
+        if(volume(drive).handles==0)return;
+        std::this_thread::sleep_for(100ms);
+    }
+    throw std::runtime_error("WinFsp handles did not close");
+}
+void eject(std::wstring const& drive) {
+    waitClosed(drive);require(wz_eject(drive.c_str())==1,"eject");
+    require((GetLogicalDrives()&(1u<<(drive[0]-L'A')))==0,"drive still mounted");
+}
+void roundtrip(fs::path const& archive) {
+    std::wcout<<L"Testing "<<archive<<std::endl;
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto original=read(archive);
+    auto drive=mount(archive,o);
+    auto root=fs::path(drive+L"\\");
+    require(!volume(drive).readOnly,"writable volume");
+    require(read(root/L"sample.txt")=="original","original contents");
+    require(fs::is_directory(root/L"empty"),"empty directory");
+    require(mount(archive,o)==drive&&wz_count()==1,"duplicate mount");
+    auto file=root/L"sample.txt";
+    HANDLE open=CreateFileW(file.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,OPEN_EXISTING,0,nullptr);
+    require(open!=INVALID_HANDLE_VALUE,"native open");
+    require(volume(drive).handles>0,"handle count");
+    require(wz_eject(drive.c_str())==0,"cannot eject open file");
+    CloseHandle(open);
+    fs::create_directory(root/L"new folder");
+    write(root/L"new folder"/L"\u6d4b\u8bd5.txt","abcdef");
+    fs::resize_file(root/L"new folder"/L"\u6d4b\u8bd5.txt",3);
+    fs::rename(root/L"new folder"/L"\u6d4b\u8bd5.txt",root/L"renamed.txt");
+    fs::remove(root/L"new folder");fs::remove(file);
+    write(root/L"created.txt","updated");
+    waitClosed(drive);
+    require(volume(drive).dirty,"dirty state");
+    require(wz_tick()==1&&read(archive)==original,"batch retained");
+    require(wz_flush(drive.c_str())==1,"save archive");
+    require(!volume(drive).dirty&&read(archive)!=original,"commit changed original");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(read(root/L"created.txt")=="updated","persisted create");
+    require(read(root/L"renamed.txt")=="abc","persisted truncate and rename");
+    require(!fs::exists(root/L"sample.txt"),"persisted deletion");
+    require(fs::is_directory(root/L"empty"),"persisted empty directory");
+    eject(drive);
+}
+void readonly(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);
-    if(o.delaySeconds!=5 || o.level!=5 || wz_count()!=0) return 1;
-    wchar_t mount[16]{},err[512]{};
-    if(wz_mount(L"Z:\\file-that-does-not-exist.zip",&o,mount,16)) return 2;
-    wz_error(err,512);if(!*err || wz_count()!=0) return 3;
-    if(wz_eject(L"Z:") || wz_flush(L"Z:")) return 4;
-    if(!wz_shutdown()) return 5;
-    std::cout<<"Core API checks passed\n";
-    return 0;
+    auto drive=mount(archive,o);auto root=drive+L"\\";
+    require(volume(drive).readOnly,"read-only session");
+    DWORD flags=0;
+    require(GetVolumeInformationW(root.c_str(),nullptr,0,nullptr,nullptr,&flags,nullptr,0)!=0,
+            "query volume information");
+    require((flags&FILE_READ_ONLY_VOLUME)!=0,"Windows volume is read-only");
+    HANDLE h=CreateFileW((root+L"new.txt").c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
+    if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);
+    require(h==INVALID_HANDLE_VALUE,"write rejected");
+    require(read(fs::path(root)/L"sample.txt")=="original","read-only data");
+    eject(drive);
+}
+void idle(fs::path const& archive) {
+    WzOptions o{};wz_default_options(&o);o.idleMinutes=1;o.delaySeconds=1;
+    auto drive=mount(archive,o);write(fs::path(drive+L"\\")/L"auto.txt","auto");
+    waitClosed(drive);std::this_thread::sleep_for(2s);require(wz_tick()==1,"automatic writeback");
+    require(!volume(drive).dirty,"automatic writeback persisted");
+    std::this_thread::sleep_for(61s);
+    require(wz_tick()==1&&wz_count()==0,"automatic idle eject");
+    drive=mount(archive,o);require(read(fs::path(drive+L"\\")/L"auto.txt")=="auto","auto commit survived");
+    eject(drive);
+}
+int wmain(int argc,wchar_t** argv) {
+    try {
+        WzOptions o{};wz_default_options(&o);
+        require(o.delaySeconds==5 && o.level==5 && wz_count()==0,"defaults");
+        wchar_t drive[16]{},error[512]{};
+        require(wz_mount(L"Z:\\file-that-does-not-exist.zip",&o,drive,16)==0,"missing archive");
+        wz_error(error,512);require(*error&&wz_count()==0,"error state");
+        require(wz_eject(L"Z:")==0&&wz_flush(L"Z:")==0,"unknown volume");
+        if(argc==2) {
+            fs::path root=argv[1];
+            for(auto ext:{L".zip",L".7z",L".tar",L".tar.gz"})roundtrip(root/(std::wstring(L"core")+ext));
+            readonly(root/L"readonly.cab");idle(root/L"idle.zip");
+        }
+        require(wz_shutdown()==1,"shutdown");
+        std::cout<<"Native tests passed\n";return 0;
+    }catch(std::exception const& e) {std::cerr<<e.what()<<"\n";wz_shutdown();return 1;}
 }

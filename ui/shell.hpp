@@ -36,7 +36,7 @@ inline void registerAssociations() {
         regString(cap+L"\\FileAssociations",e.c_str(),progId);
         regString(classes+e+L"\\OpenWithProgids",progId,L"");
         wchar_t value[512]{};DWORD size=sizeof(value);
-        if(RegGetValueW(HKEY_CURRENT_USER,(classes+e).c_str(),nullptr,RRF_RT_REG_SZ,nullptr,value,&size)!=ERROR_SUCCESS || !*value)
+        if(RegGetValueW(HKEY_CLASSES_ROOT,e.c_str(),nullptr,RRF_RT_REG_SZ,nullptr,value,&size)!=ERROR_SUCCESS || !*value)
             regString(classes+e,nullptr,progId);
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED,SHCNF_IDLIST,nullptr,nullptr);

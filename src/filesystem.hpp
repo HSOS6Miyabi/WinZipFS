@@ -611,9 +611,9 @@ NTSTATUS Ptfs::Flush(
     PVOID FileDesc,
     FileInfo *FileInfo)
 {
+    if (nullptr == FileDesc) return STATUS_SUCCESS;
     HANDLE Handle = HandleFromFileDesc(FileDesc);
 
-    /* we do not flush the whole volume, so just return SUCCESS */
     if (0 == Handle)
         return STATUS_SUCCESS;
 
