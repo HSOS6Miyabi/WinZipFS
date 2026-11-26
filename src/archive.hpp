@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <bit7z/bitarchivereader.hpp>
+#include <bit7z/biterror.hpp>
 #include <bit7z/bitarchivewriter.hpp>
 #include <bit7z/bitformat.hpp>
 #include <bit7z/bitcompressionlevel.hpp>
