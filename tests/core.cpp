@@ -149,7 +149,12 @@ int wmain(int argc,wchar_t** argv) {
         require(wz_eject(L"Z:")==0&&wz_flush(L"Z:")==0,"unknown volume");
         if(argc==2) {
             fs::path root=argv[1];
-            for(auto ext:{L".zip",L".7z",L".tar",L".tar.gz"})roundtrip(root/(std::wstring(L"core")+ext));
+            for(auto ext:{L".zip",L".7z",L".tar",L".tar.gz",L".tar.bz2",L".tar.xz"})roundtrip(root/(std::wstring(L"core")+ext));
+            for(auto name:{L"traversal.zip",L"collision.zip",L"reserved.zip",L"encrypted.zip"}) {
+                wchar_t rejected[16]{};
+                require(wz_mount((root/name).c_str(),&o,rejected,16)==0,"unsafe or encrypted archive rejected");
+                require(wz_count()==0,"rejected archive left no mounted volume");
+            }
             readonly(root/L"readonly.cab");
             fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
             conflict(root/L"conflict.zip");idle(root/L"idle.zip");

@@ -13,8 +13,12 @@ try {
         & $seven a "-t$format" $archive '.\*' -y
         if ($LASTEXITCODE -ne 0) { throw "Fixture $format failed" }
     }
-    & $seven a -tgzip (Join-Path $root 'core.tar.gz') (Join-Path $root 'core.tar') -y
-    if ($LASTEXITCODE -ne 0) { throw 'Compressed TAR fixture failed' }
+    foreach ($entry in @(@('gzip','gz'),@('bzip2','bz2'),@('xz','xz'))) {
+        & $seven a "-t$($entry[0])" (Join-Path $root "core.tar.$($entry[1])") (Join-Path $root 'core.tar') -y
+        if ($LASTEXITCODE -ne 0) { throw "Compressed TAR fixture $($entry[0]) failed" }
+    }
+    & $seven a -tzip (Join-Path $root 'encrypted.zip') '.\*' -pTestFixturePassword -mem=AES256 -y
+    if ($LASTEXITCODE -ne 0) { throw 'Encrypted fixture failed' }
     & $seven a -tzip (Join-Path $root 'ui.zip') '.\*' -y
     if ($LASTEXITCODE -ne 0) { throw 'UI ZIP fixture failed' }
     & $seven a -t7z (Join-Path $root 'tray.7z') '.\*' -y
@@ -24,3 +28,18 @@ try {
     & makecab.exe (Join-Path $source 'sample.txt') (Join-Path $root 'readonly.cab') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'CAB fixture failed' }
 } finally { Pop-Location }
+
+@'
+from pathlib import Path
+from zipfile import ZipFile
+import sys
+root = Path(sys.argv[1])
+with ZipFile(root / "traversal.zip", "w") as z:
+    z.writestr("../outside.txt", "must never be extracted")
+with ZipFile(root / "collision.zip", "w") as z:
+    z.writestr("sample.txt", "one")
+    z.writestr("SAMPLE.TXT", "two")
+with ZipFile(root / "reserved.zip", "w") as z:
+    z.writestr("CON.txt", "reserved device name")
+'@ | python - $root
+if ($LASTEXITCODE -ne 0) { throw 'Invalid archive fixtures failed' }
