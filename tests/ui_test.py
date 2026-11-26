@@ -72,8 +72,21 @@ def value(identifier, text):
     assert ctl(identifier).iface_value.CurrentValue == str(text), identifier
 
 
+COMBO_VALUES = {
+    "Level": ("Store (0)", "Fastest (1)", "Fast (3)", "Normal (5)", "Maximum (7)", "Ultra (9)"),
+    "Method": ("Automatic", "Store", "Deflate (ZIP)", "LZMA2 (7z)", "BZip2 (ZIP / 7z)"),
+}
+
+
 def combo(identifier, index):
-    ctl(identifier, bring_into_view=True).select(index)
+    target = COMBO_VALUES[identifier][index]
+    control = ctl(identifier, bring_into_view=True)
+    control.select(target)
+    wait_for(lambda: ctl(identifier).selected_text() == target, f"Selection failed for {identifier}")
+
+
+def selected_index(identifier):
+    return COMBO_VALUES[identifier].index(ctl(identifier).selected_text())
 
 
 def toggle(identifier):
@@ -182,7 +195,7 @@ def current_options():
     return (ctl("Batch").iface_toggle.CurrentToggleState,
             int(ctl("Delay").iface_value.CurrentValue),
             int(ctl("Idle").iface_value.CurrentValue),
-            ctl("Level").selected_index(), ctl("Method").selected_index(),
+            selected_index("Level"), selected_index("Method"),
             int(ctl("Threads").iface_value.CurrentValue),
             ctl("Solid").iface_toggle.CurrentToggleState)
 
@@ -219,8 +232,11 @@ try:
     click("Register")
     status_contains("registered")
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\WinZipFS\Capabilities\FileAssociations") as key:
-        assert winreg.QueryValueEx(key, ".zip")[0] == "WinZipFS.Archive"
-        assert winreg.QueryValueEx(key, ".rar")[0] == "WinZipFS.Archive"
+        for ext in (".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".gzip", ".tgz", ".bz2", ".bzip2",
+                    ".tbz", ".tbz2", ".xz", ".txz", ".zst", ".tzst", ".cab", ".arj", ".lha", ".lzh",
+                    ".z", ".cpio", ".deb", ".rpm", ".iso", ".wim", ".swm", ".esd", ".dmg", ".xar",
+                    ".ar", ".001", ".chm", ".lzma", ".udf", ".squashfs"):
+            assert winreg.QueryValueEx(key, ext)[0] == "WinZipFS.Archive", ext
     click("DefaultApps")
     wait_for(lambda: "Windows default apps" in status(), "Default apps command did not report a result")
     choose_archive(FIX / "ui.zip")
@@ -238,6 +254,7 @@ try:
     click("Apply")
     status_contains("Settings updated")
     assert current_options() == (1, 8, 2, 4, 2, 2, 0)
+    window.capture_as_image().save(RESULTS / "dashboard-settings.png")
     value("Delay", 0)
     click("Apply")
     status_contains("Error:")
@@ -266,6 +283,8 @@ try:
     wait_closed()
     click("Flush")
     status_contains("Saved")
+    with ZipFile(FIX / "ui.zip", "r") as archive:
+        assert archive.read("ui.txt") == b"WinUI writeback"
     click("Open")
     status_contains("Opened ")
     time.sleep(2)
@@ -310,6 +329,7 @@ try:
     assert current_options() == (0, 3, 0, 1, 0, 1, 1)
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{ENTER}")
     status_contains("Batch mode updated")
+    assert ctl("Batch").iface_toggle.CurrentToggleState == 1
     (tray_root / "tray.txt").write_text("tray writeback", encoding="utf-8")
     wait_closed()
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{ENTER}")
@@ -317,6 +337,10 @@ try:
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{DOWN}{ENTER}")
     status_contains("Ejected")
     wait_for(lambda: not tray_root.exists(), "Tray eject failed")
+    seven_zip = Path(r"C:\Program Files\7-Zip\7z.exe")
+    result = subprocess.run([str(seven_zip), "x", "-so", str(FIX / "tray.7z"), "tray.txt"],
+                            check=True, capture_output=True)
+    assert result.stdout == b"tray writeback"
     click("Exit")
     app.wait_for_process_exit(timeout=60)
     app = Application(backend="uia").start(f'"{EXE}" --no-explorer')
@@ -326,9 +350,9 @@ try:
     verify_tray_icon()
     tray_menu("{END}{ENTER}")
     app.wait_for_process_exit(timeout=60)
-    (RESULTS / "ui.txt").write_text("WinUI and tray automation passed\n")
+    (RESULTS / "ui.txt").write_text("WinUI and tray automation passed\n", encoding="utf-8")
 except Exception:
-    (RESULTS / "ui.txt").write_text(traceback.format_exc())
+    (RESULTS / "ui.txt").write_text(traceback.format_exc(), encoding="utf-8")
     try:
         if window is not None:
             window.capture_as_image().save(RESULTS / "ui-failure.png")
