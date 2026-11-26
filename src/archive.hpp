@@ -49,7 +49,9 @@ inline bool same(const std::wstring& a,const std::wstring& b) {
 inline std::wstring safeName(std::wstring s,bool dir) {
     std::replace(s.begin(),s.end(),L'/',L'\\');
     while(s.starts_with(L".\\")) s.erase(0,2);
+    if(!s.empty() && s.front()==L'\\') throw std::runtime_error("Invalid or absolute archive path");
     if(dir) while(!s.empty() && s.back()==L'\\') s.pop_back();
+    else if(!s.empty() && s.back()==L'\\') throw std::runtime_error("Invalid file path");
     if(dir && (s==L"."||s.empty())) return {};
     if(s.empty() || s.front()==L'\\') throw std::runtime_error("Invalid or absolute archive path");
     size_t start=0;
@@ -61,6 +63,7 @@ inline std::wstring safeName(std::wstring s,bool dir) {
            std::any_of(part.begin(),part.end(),[](wchar_t c){return c<32;}))
             throw std::runtime_error("Archive contains an unsafe Windows file name");
         auto stem=lower(part.substr(0,part.find(L'.')));
+        while(!stem.empty() && stem.back()==L' ') stem.pop_back();
         if(stem==L"con"||stem==L"prn"||stem==L"aux"||stem==L"nul"||stem==L"conin$"||stem==L"conout$"||
            (stem.size()==4 && (stem.starts_with(L"com")||stem.starts_with(L"lpt")) &&
             ((stem.back()>=L'0'&&stem.back()<=L'9')||stem.back()==L'\u00b9'||stem.back()==L'\u00b2'||stem.back()==L'\u00b3')))
@@ -74,6 +77,23 @@ inline bool present(const BitPropVariant& v) {
     if(v.isBool()) return v.getBool();
     if(v.isString()) return !v.getString().empty();
     return true;
+}
+inline bool nonzero(const BitPropVariant& v) {
+    if(v.isEmpty()) return false;
+    if(v.isUInt64()) return v.getUInt64()!=0;
+    if(v.isUInt32()) return v.getUInt32()!=0;
+    if(v.isInt64()) return v.getInt64()!=0;
+    if(v.isInt32()) return v.getInt32()!=0;
+    return present(v);
+}
+inline bool archiveReadOnly(const BitArchiveReader& reader) {
+    if(nonzero(reader.archiveProperty(BitProperty::ErrorFlags)))
+        throw std::runtime_error("The archive contains structural errors");
+    return reader.isMultiVolume() || present(reader.archiveProperty(BitProperty::Comment)) ||
+           nonzero(reader.archiveProperty(BitProperty::Offset)) ||
+           nonzero(reader.archiveProperty(BitProperty::TailSize)) ||
+           nonzero(reader.archiveProperty(BitProperty::EmbeddedStubSize)) ||
+           nonzero(reader.archiveProperty(BitProperty::WarningFlags));
 }
 inline bool validate(const BitArchiveReader& reader,const fs::path& root) {
     std::map<std::wstring,bool,CaseLess> names, prefixes;
@@ -192,17 +212,17 @@ inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::p
         auto name=lower(source.filename().wstring());
         bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
         if(fmt.outer||zstdTar) {
-            bool outerMetadata=outer.isMultiVolume()||present(outer.archiveProperty(BitProperty::Comment));
+            bool outerMetadata=archiveReadOnly(outer);
             TemporaryFile tar(root.parent_path()/L"extracted.tar");
             extractStreamItem(outer,tar.path());
             BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
-            if(validate(inner,root)||outerMetadata||zstdTar) fmt={};
+            if(validate(inner,root)||archiveReadOnly(inner)||outerMetadata||zstdTar) fmt={};
             if(inner.itemsCount()) inner.extractTo(path8(root));
         } else if(singleStream(outer.detectedFormat())&&outer.itemsCount()==1) {
             fmt={};
             extractStandalone(outer,source,root);
         } else {
-            if(validate(outer,root) || outer.isMultiVolume() || present(outer.archiveProperty(BitProperty::Comment)))
+            if(validate(outer,root) || archiveReadOnly(outer))
                 fmt={};
             if(outer.itemsCount()) outer.extractTo(path8(root));
         }

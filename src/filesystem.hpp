@@ -151,6 +151,7 @@ protected:
         PVOID FileNode,
         PVOID FileDesc,
         PWSTR FileName);
+    NTSTATUS SetDelete(PVOID FileNode, PVOID FileDesc, PWSTR FileName, BOOLEAN DeleteFile) override;
     NTSTATUS Rename(
         PVOID FileNode,
         PVOID FileDesc,
@@ -271,7 +272,7 @@ NTSTATUS Ptfs::GetFileInfoInternal(HANDLE Handle, FileInfo *FileInfo)
     FileInfo->LastAccessTime = ((PLARGE_INTEGER)&ByHandleFileInfo.ftLastAccessTime)->QuadPart;
     FileInfo->LastWriteTime = ((PLARGE_INTEGER)&ByHandleFileInfo.ftLastWriteTime)->QuadPart;
     FileInfo->ChangeTime = FileInfo->LastWriteTime;
-    FileInfo->IndexNumber = 0;
+    FileInfo->IndexNumber = (UINT64(ByHandleFileInfo.nFileIndexHigh) << 32) | ByHandleFileInfo.nFileIndexLow;
     FileInfo->HardLinks = 0;
 
     return STATUS_SUCCESS;
@@ -292,7 +293,7 @@ NTSTATUS Ptfs::Init(PVOID Host0)
     Host->SetPostCleanupWhenModifiedOnly(TRUE);
     Host->SetPassQueryDirectoryPattern(TRUE);
     Host->SetVolumeCreationTime(_CreationTime);
-    Host->SetVolumeSerialNumber(0);
+    Host->SetVolumeSerialNumber(static_cast<UINT32>(_CreationTime ^ (_CreationTime >> 32) ^ std::hash<std::wstring_view>{}(_Path)));
     Host->SetFlushAndPurgeOnCleanup(TRUE);
     return STATUS_SUCCESS;
 }
@@ -306,7 +307,7 @@ NTSTATUS Ptfs::GetVolumeInfo(
     if (!GetVolumePathName(_Path, Root, MAX_PATH))
         return NtStatusFromWin32(GetLastError());
 
-    if (!GetDiskFreeSpaceEx(Root, 0, &TotalSize, &FreeSize))
+    if (!GetDiskFreeSpaceEx(Root, &FreeSize, &TotalSize, nullptr))
         return NtStatusFromWin32(GetLastError());
 
     VolumeInfo->TotalSize = TotalSize.QuadPart;
@@ -401,7 +402,7 @@ NTSTATUS Ptfs::Create(
     FileDesc = new PtfsFileDesc;
 
     SecurityAttributes.nLength = sizeof SecurityAttributes;
-    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
+    SecurityAttributes.lpSecurityDescriptor = nullptr;
     SecurityAttributes.bInheritHandle = FALSE;
 
     CreateFlags = FILE_FLAG_BACKUP_SEMANTICS;
@@ -422,6 +423,11 @@ NTSTATUS Ptfs::Create(
     else
         FileAttributes &= ~FILE_ATTRIBUTE_DIRECTORY;
 
+    if (FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_COMPRESSED))
+    {
+        delete FileDesc;
+        return STATUS_NOT_SUPPORTED;
+    }
     if (0 == FileAttributes)
         FileAttributes = FILE_ATTRIBUTE_NORMAL;
 
@@ -536,9 +542,11 @@ VOID Ptfs::Cleanup(
 {
     HANDLE Handle = HandleFromFileDesc(FileDesc);
 
-    if (!readOnly && (Flags & CleanupDelete))
+    if (!readOnly && (Flags & CleanupDelete) && Handle != INVALID_HANDLE_VALUE)
     {
         Changed();
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        SetFileInformationByHandle(Handle, FileDispositionInfo, &disposition, sizeof disposition);
         CloseHandle(Handle);
 
         /* this will make all future uses of Handle to fail with STATUS_INVALID_HANDLE */
@@ -589,7 +597,7 @@ NTSTATUS Ptfs::Write(
     FileInfo *FileInfo)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
+    *PBytesTransferred = 0;
     HANDLE Handle = HandleFromFileDesc(FileDesc);
     LARGE_INTEGER FileSize;
     OVERLAPPED Overlapped = { 0 };
@@ -600,7 +608,7 @@ NTSTATUS Ptfs::Write(
             return NtStatusFromWin32(GetLastError());
 
         if (Offset >= (UINT64)FileSize.QuadPart)
-            return STATUS_SUCCESS;
+            return GetFileInfoInternal(Handle, FileInfo);
         if (Offset + Length > (UINT64)FileSize.QuadPart)
             Length = (ULONG)((UINT64)FileSize.QuadPart - Offset);
     }
@@ -611,6 +619,7 @@ NTSTATUS Ptfs::Write(
     if (!WriteFile(Handle, Buffer, Length, PBytesTransferred, &Overlapped))
         return NtStatusFromWin32(GetLastError());
 
+    if (*PBytesTransferred) Changed();
     return GetFileInfoInternal(Handle, FileInfo);
 }
 
@@ -652,9 +661,12 @@ NTSTATUS Ptfs::SetBasicInfo(
     FileInfo *FileInfo)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
     HANDLE Handle = HandleFromFileDesc(FileDesc);
     FILE_BASIC_INFO BasicInfo = { 0 };
+
+    if (FileAttributes != INVALID_FILE_ATTRIBUTES &&
+        (FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_COMPRESSED)))
+        return STATUS_NOT_SUPPORTED;
 
     if (INVALID_FILE_ATTRIBUTES == FileAttributes)
         FileAttributes = 0;
@@ -671,6 +683,7 @@ NTSTATUS Ptfs::SetBasicInfo(
         FileBasicInfo, &BasicInfo, sizeof BasicInfo))
         return NtStatusFromWin32(GetLastError());
 
+    Changed();
     return GetFileInfoInternal(Handle, FileInfo);
 }
 
@@ -682,7 +695,6 @@ NTSTATUS Ptfs::SetFileSize(
     FileInfo *FileInfo)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
     HANDLE Handle = HandleFromFileDesc(FileDesc);
     FILE_ALLOCATION_INFO AllocationInfo;
     FILE_END_OF_FILE_INFO EndOfFileInfo;
@@ -715,6 +727,7 @@ NTSTATUS Ptfs::SetFileSize(
             return NtStatusFromWin32(GetLastError());
     }
 
+    Changed();
     return GetFileInfoInternal(Handle, FileInfo);
 }
 
@@ -724,16 +737,17 @@ NTSTATUS Ptfs::CanDelete(
     PWSTR FileName)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
-    HANDLE Handle = HandleFromFileDesc(FileDesc);
-    FILE_DISPOSITION_INFO DispositionInfo;
+    return SetDelete(FileNode, FileDesc, FileName, TRUE);
+}
 
-    DispositionInfo.DeleteFile = TRUE;
-
-    if (!SetFileInformationByHandle(Handle,
-        FileDispositionInfo, &DispositionInfo, sizeof DispositionInfo))
+NTSTATUS Ptfs::SetDelete(PVOID, PVOID FileDesc, PWSTR FileName, BOOLEAN DeleteFile)
+{
+    if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
+    if (FileName && wcscmp(FileName, L"\\") == 0) return STATUS_CANNOT_DELETE;
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile = DeleteFile;
+    if (!SetFileInformationByHandle(HandleFromFileDesc(FileDesc), FileDispositionInfo, &disposition, sizeof disposition))
         return NtStatusFromWin32(GetLastError());
-
     return STATUS_SUCCESS;
 }
 
@@ -745,7 +759,6 @@ NTSTATUS Ptfs::Rename(
     BOOLEAN ReplaceIfExists)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
     WCHAR FullPath[FULLPATH_SIZE], NewFullPath[FULLPATH_SIZE];
 
     if (!ConcatPath(FileName, FullPath))
@@ -757,6 +770,7 @@ NTSTATUS Ptfs::Rename(
     if (!MoveFileExW(FullPath, NewFullPath, ReplaceIfExists ? MOVEFILE_REPLACE_EXISTING : 0))
         return NtStatusFromWin32(GetLastError());
 
+    Changed();
     return STATUS_SUCCESS;
 }
 
@@ -789,13 +803,8 @@ NTSTATUS Ptfs::SetSecurity(
     PSECURITY_DESCRIPTOR ModificationDescriptor)
 {
     if (readOnly) return STATUS_MEDIA_WRITE_PROTECTED;
-    Changed();
-    HANDLE Handle = HandleFromFileDesc(FileDesc);
-
-    if (!SetKernelObjectSecurity(Handle, SecurityInformation, ModificationDescriptor))
-        return NtStatusFromWin32(GetLastError());
-
-    return STATUS_SUCCESS;
+    // Archive volumes do not persist Windows ACLs.
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS Ptfs::ReadDirectory(

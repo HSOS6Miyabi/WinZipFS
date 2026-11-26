@@ -216,6 +216,10 @@ public:
     {
         return STATUS_INVALID_DEVICE_REQUEST;
     }
+    virtual NTSTATUS SetDelete(PVOID FileNode, PVOID FileDesc, PWSTR FileName, BOOLEAN DeleteFile)
+    {
+        return DeleteFile ? CanDelete(FileNode, FileDesc, FileName) : STATUS_SUCCESS;
+    }
     virtual NTSTATUS Rename(
         PVOID FileNode,
         PVOID FileDesc,
@@ -1008,6 +1012,16 @@ private:
                 FileName);
         )
     }
+    static NTSTATUS SetDelete(FSP_FILE_SYSTEM *FileSystem0, PVOID FullContext, PWSTR FileName, BOOLEAN DeleteFile)
+    {
+        FileSystemBase *self = (FileSystemBase *)FileSystem0->UserContext;
+        FSP_CPP_EXCEPTION_GUARD(
+            return self->SetDelete(
+                (PVOID)(UINT_PTR)((FSP_FSCTL_TRANSACT_FULL_CONTEXT *)FullContext)->UserContext,
+                (PVOID)(UINT_PTR)((FSP_FSCTL_TRANSACT_FULL_CONTEXT *)FullContext)->UserContext2,
+                FileName, DeleteFile);
+        )
+    }
     static NTSTATUS Rename(FSP_FILE_SYSTEM *FileSystem0,
         PVOID FullContext,
         PWSTR FileName,
@@ -1183,6 +1197,9 @@ private:
             SetReparsePoint,
             DeleteReparsePoint,
             GetStreamInfo,
+            nullptr, // GetDirInfoByName
+            nullptr, // Control
+            SetDelete,
         };
         return &_Interface;
     }

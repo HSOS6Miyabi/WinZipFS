@@ -19,6 +19,9 @@ typedef struct WzVolume {
     WzOptions options;
 } WzVolume;
 WZ_API int wz_mount(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
+WZ_API int wz_mount_readonly(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
+WZ_API int wz_save_copy(const wchar_t* mount, const wchar_t* destination);
+WZ_API int wz_discard(const wchar_t* mount);
 WZ_API int wz_count(void);
 WZ_API int wz_get(int index, WzVolume* info);
 WZ_API int wz_options(const wchar_t* mount, const WzOptions* options);

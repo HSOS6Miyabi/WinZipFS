@@ -40,8 +40,19 @@ inline const Bit7zLibrary& lib() {
     if(!engine) engine=std::make_unique<Bit7zLibrary>(path8(moduleDir()/L"7z.dll"));
     return *engine;
 }
+struct FileHandle {
+    HANDLE value=INVALID_HANDLE_VALUE;
+    explicit FileHandle(HANDLE handle):value(handle) {}
+    FileHandle(const FileHandle&)=delete;
+    FileHandle& operator=(const FileHandle&)=delete;
+    ~FileHandle() {if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);}
+};
 struct Fingerprint {
     BY_HANDLE_FILE_INFORMATION info{};
+    explicit Fingerprint(HANDLE h) {
+        if(h==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h,&info))
+            throw std::runtime_error("Cannot identify original archive");
+    }
     explicit Fingerprint(const fs::path& p) {
         HANDLE h=CreateFileW(p.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
                              nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -70,7 +81,7 @@ struct Session {
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
     bool mounted=false;
-    Session(const fs::path& p,const WzOptions& o):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
+    Session(const fs::path& p,const WzOptions& o,bool forceReadOnly):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
         checkOptions(o);
         cache=local()/guid(); root=cache/L"files";
         fs::create_directories(root);
@@ -79,6 +90,7 @@ struct Session {
             manifest<<path8(original)<<"\n"; manifest.close();
             format=extract(lib(),original,root);
             if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed while opening");
+            if(forceReadOnly) format={};
             ptfs.readOnly=!format.inner;
             ptfs.label=original.filename().wstring();
             auto s=root.wstring();
@@ -104,7 +116,12 @@ struct Session {
     void commitFrozen() {
         if(!ptfs.dirty) return;
         if(ptfs.readOnly) throw std::runtime_error("Read-only archive");
-        if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed; cache retained for recovery");
+        FileHandle source(CreateFileW(original.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,
+                                     nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+        if(source.value==INVALID_HANDLE_VALUE)
+            throw std::runtime_error("The original archive is open for writing or unavailable. Close the other application and retry.");
+        if(!(fingerprint==Fingerprint(source.value)) || !(fingerprint==Fingerprint(original)))
+            throw std::runtime_error("Original archive changed; cache retained for recovery");
         auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp"+original.extension().wstring());
         auto backup=original.parent_path()/(L".winzipfs-"+guid()+L".bak");
         auto work=cache/L"repack.tar";
@@ -124,6 +141,11 @@ struct Session {
                    GetFileAttributesW(backup.c_str())!=INVALID_FILE_ATTRIBUTES)
                     MoveFileExW(backup.c_str(),original.c_str(),MOVEFILE_WRITE_THROUGH);
                 throw std::runtime_error("Cannot replace original archive (Windows error "+std::to_string(code)+"); cache retained; replacement: "+path8(tmp)+"; backup: "+path8(backup));
+            }
+            if(!(fingerprint==Fingerprint(backup))) {
+                auto packed=original.parent_path()/(L".winzipfs-"+guid()+L".recovered"+original.extension().wstring());
+                ReplaceFileW(original.c_str(),backup.c_str(),packed.c_str(),0,nullptr,nullptr);
+                throw std::runtime_error("Original archive was replaced concurrently; cached files and replacement backups retained");
             }
             fingerprint=Fingerprint(original);
             ptfs.dirty=false;
@@ -145,17 +167,46 @@ struct Session {
         if(ptfs.handles!=0) throw std::runtime_error("Files are still open; close them before saving or ejecting");
         ptfs.closing=true;
     }
+    void exportCopy(const fs::path& destination) {
+        freeze();
+        try {
+            auto target=fs::absolute(destination);
+            auto ext=lower(target.extension().wstring());
+            Format copyFormat{ext==L".zip"?&BitFormat::Zip:ext==L".7z"?&BitFormat::SevenZip:nullptr};
+            if(!copyFormat.inner) throw std::runtime_error("Choose a .zip or .7z destination");
+            if(fs::exists(target)) throw std::runtime_error("The destination already exists");
+            if(!fs::is_directory(target.parent_path())) throw std::runtime_error("The destination directory does not exist");
+            auto temp=target.parent_path()/(L".winzipfs-"+guid()+L".tmp"+target.extension().wstring());
+            TemporaryFile cleanup(temp);
+            WzOptions copyOptions=options;
+            copyOptions.method=0;
+            pack(lib(),root,temp,cache/L"copy.tar",copyFormat,copyOptions);
+            FileHandle out(CreateFileW(temp.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,
+                                       nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+            if(out.value==INVALID_HANDLE_VALUE||!FlushFileBuffers(out.value))
+                throw std::runtime_error("Cannot flush the exported archive");
+            if(!MoveFileExW(temp.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))
+                throw std::runtime_error("Cannot create the requested archive copy");
+            ptfs.Touch();ptfs.closing=false;
+        } catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
+    }
+    void discard() {
+        freeze();
+        host.Unmount();mounted=false;ptfs.dirty=false;
+    }
     void save(bool eject) {
         freeze();
         try {
             commitFrozen();
             if(eject) {host.Unmount();mounted=false;}
             else {ptfs.Touch();ptfs.closing=false;}
-        } catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
+        } catch(const std::exception& e) {status=wide(e.what());ptfs.closing=false;ptfs.Touch();throw;}
+        catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
 };
 std::vector<std::unique_ptr<Session>> sessions;
 Session& find(const wchar_t* d) {
+    if(!d) throw std::runtime_error("Missing mount point");
     for(auto& s:sessions) if(same(s->drive,d)) return *s;
     throw std::runtime_error("Mounted archive not found");
 }
@@ -169,21 +220,60 @@ template<class F> int call(F&& f) {
 inline void copy(wchar_t* out,unsigned size,std::wstring_view value) {
     if(out&&size) {auto n=(std::min)(size_t(size-1),value.size());std::copy_n(value.data(),n,out);out[n]=0;}
 }
+inline bool inside(const fs::path& path,const fs::path& parent) {
+    auto i=path.begin(),j=parent.begin();
+    for(;j!=parent.end();++i,++j) {
+        if(i==path.end()||!same(i->wstring(),j->wstring())) return false;
+    }
+    return true;
+}
+inline void independentPath(const fs::path& p) {
+    for(const auto& session:sessions) {
+        if(same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring())||inside(p,session->cache))
+            throw std::runtime_error("Choose a path outside mounted archive drives and their caches");
+    }
+    if(inside(p,local())) throw std::runtime_error("Choose a path outside the recovery cache");
+}
+inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size,bool ro) {
+    if(!path||!o||!mount||size<3) throw std::runtime_error("Missing archive path, options or mount buffer");
+    auto abs=fs::absolute(path);
+    independentPath(abs);
+    auto p=fs::canonical(abs);
+    independentPath(p);
+    auto id=Fingerprint(p);
+    for(const auto& session:sessions) {
+        if(same(session->original.wstring(),p.wstring())||id==session->fingerprint) {
+            if(ro&&!session->ptfs.readOnly) throw std::runtime_error("The archive is already mounted read/write. Eject it before mounting read-only.");
+            copy(mount,size,session->drive);return;
+        }
+    }
+    if(!NT_SUCCESS(Fsp::Initialize())) throw std::runtime_error("WinFsp is not installed");
+    auto session=std::make_unique<Session>(p,*o,ro);
+    copy(mount,size,session->drive);sessions.push_back(std::move(session));
+}
 }
 extern "C" {
 void wz_default_options(WzOptions* o) {if(o)*o={0,5,0,5,0,0,1};}
 const wchar_t* wz_extensions() {return L".zip;.zipx;.7z;.rar;.tar;.gz;.gzip;.tgz;.bz2;.bzip2;.tbz;.tbz2;.xz;.txz;.zst;.tzst;.cab;.arj;.lha;.lzh;.z;.cpio;.deb;.rpm;.iso;.wim;.swm;.esd;.dmg;.xar;.ar;.001;.chm;.lzma;.udf;.squashfs";}
 int wz_mount(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size) {
+    return wz::call([&]{wz::mountImpl(path,o,mount,size,false);});
+}
+int wz_mount_readonly(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size) {
+    return wz::call([&]{wz::mountImpl(path,o,mount,size,true);});
+}
+int wz_save_copy(const wchar_t* drive,const wchar_t* destination) {
     return wz::call([&]{
-        if(!path||!o) throw std::runtime_error("Missing archive path or options");
-        auto p=wz::fs::canonical(path);
-        for(const auto& s:wz::sessions) {
-            if(wz::same(s->original.wstring(),p.wstring())) {wz::copy(mount,size,s->drive);return;}
-            if(wz::Fingerprint(p)==s->fingerprint) {wz::copy(mount,size,s->drive);return;}
-        }
-        if(!NT_SUCCESS(Fsp::Initialize())) throw std::runtime_error("WinFsp is not installed");
-        auto s=std::make_unique<wz::Session>(p,*o);
-        wz::copy(mount,size,s->drive);wz::sessions.push_back(std::move(s));
+        if(!destination||!*destination) throw std::runtime_error("Choose an export destination");
+        auto p=wz::fs::absolute(destination);
+        auto parent=wz::fs::canonical(p.parent_path());
+        wz::independentPath(p);wz::independentPath(parent);
+        wz::find(drive).exportCopy(parent/p.filename());
+    });
+}
+int wz_discard(const wchar_t* drive) {
+    return wz::call([&]{
+        auto& session=wz::find(drive);session.discard();
+        std::erase_if(wz::sessions,[&](const auto& p){return p.get()==&session;});
     });
 }
 int wz_count() {std::lock_guard lock(wz::manager);return (int)wz::sessions.size();}

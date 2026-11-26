@@ -94,6 +94,45 @@ void roundtrip(fs::path const& archive) {
     require(read(root/L"recreated.txt")=="recreated","write to previously empty archive");
     eject(drive);
 }
+void safety(fs::path const& archive,const fs::path& directory) {
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    const auto before=read(archive);
+    wchar_t buffer[16]{};
+    require(wz_mount_readonly(archive.c_str(),&o,buffer,16)==1,"forced read-only");
+    std::wstring drive=buffer;auto root=fs::path(drive+L"\\");
+    require(volume(drive).readOnly,"forced read-only flag");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(wz_mount_readonly(archive.c_str(),&o,buffer,16)==0,"reject conflicting mount mode");
+    auto file=root/L"sample.txt";
+    HANDLE h=CreateFileW(file.c_str(),DELETE|GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"open for cancellable deletion");
+    FILE_DISPOSITION_INFO disposition{TRUE};
+    require(SetFileInformationByHandle(h,FileDispositionInfo,&disposition,sizeof disposition)!=0,"mark delete");
+    disposition.DeleteFile=FALSE;
+    require(SetFileInformationByHandle(h,FileDispositionInfo,&disposition,sizeof disposition)!=0,"cancel delete");
+    CloseHandle(h);waitClosed(drive);
+    require(read(file)=="original","cancelled deletion retained file");
+    write(root/L"cached.txt","unsaved");
+    waitClosed(drive);
+    h=CreateFileW(archive.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"hold external writer");
+    require(wz_flush(drive.c_str())==0,"reject active external writer");
+    CloseHandle(h);
+    require(read(archive)==before&&volume(drive).dirty,"original and pending data preserved");
+    auto copy=directory/L"export-copy.7z";
+    require(wz_save_copy(drive.c_str(),copy.c_str())==1,"export unsaved data");
+    require(wz_save_copy(drive.c_str(),copy.c_str())==0,"do not overwrite export");
+    require(read(archive)==before,"export does not alter original");
+    require(wz_discard(drive.c_str())==1,"discard pending modifications");
+    require(read(archive)==before,"discard does not alter original");
+    drive=mount(copy,o);root=fs::path(drive+L"\\");
+    require(read(root/L"cached.txt")=="unsaved","exported contents");
+    require(read(root/L"sample.txt")=="original","exported original data");
+    fs::copy_file(archive,root/L"nested.zip");
+    require(wz_mount((root/L"nested.zip").c_str(),&o,buffer,16)==0,"reject recursive mount");
+    waitClosed(drive);require(wz_discard(drive.c_str())==1,"discard copy");
+}
 void readonly(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);
     auto drive=mount(archive,o);auto root=drive+L"\\";
@@ -192,7 +231,10 @@ int wmain(int argc,wchar_t** argv) {
                 readonly(root/name);
             }
             fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
-            conflict(root/L"conflict.zip");idle(root/L"idle.zip");
+            conflict(root/L"conflict.zip");
+            fs::copy_file(root/L"ui.zip",root/L"safety.zip",fs::copy_options::overwrite_existing);
+            safety(root/L"safety.zip",root);
+            idle(root/L"idle.zip");
         }
         require(wz_shutdown()==1,"shutdown");
         std::cout<<"Native tests passed\n";return 0;
