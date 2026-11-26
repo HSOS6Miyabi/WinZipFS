@@ -8,6 +8,8 @@ import subprocess
 import time
 import traceback
 import winreg
+import win32api
+import win32gui
 from zipfile import ZipFile, ZIP_STORED
 
 from pywinauto import Application, Desktop
@@ -213,6 +215,9 @@ try:
     window = app.window(title="WinZipFS")
     window.wait("exists ready", timeout=90)
     main_hwnd = window.wrapper_object().handle
+    work = win32api.GetMonitorInfo(win32api.MonitorFromWindow(main_hwnd, 2))["Work"]
+    rect = win32gui.GetWindowRect(main_hwnd)
+    assert rect[0] >= work[0] and rect[1] >= work[1] and rect[2] <= work[2] and rect[3] <= work[3], (rect, work)
     window = app.window(handle=main_hwnd, visible_only=False)
     verify_tray_icon()
     for name in ("DashboardScroll", "Mount", "Hide", "Exit", "Status", "Summary", "Volumes", "Details",

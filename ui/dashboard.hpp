@@ -397,7 +397,15 @@ public:
         build();
         winrt::check_hresult(window.as<IWindowNative>()->get_WindowHandle(&hwnd));
         auto dpi=GetDpiForWindow(hwnd);
-        SetWindowPos(hwnd,nullptr,0,0,MulDiv(900,dpi,96),MulDiv(850,dpi,96),SWP_NOMOVE|SWP_NOZORDER);
+        int width=MulDiv(900,dpi,96),height=MulDiv(850,dpi,96);
+        MONITORINFO monitor{};monitor.cbSize=sizeof(monitor);
+        if(GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor)) {
+            auto const& work=monitor.rcWork;
+            int workWidth=work.right-work.left,workHeight=work.bottom-work.top;
+            width=(std::min)(width,workWidth);
+            height=(std::min)(height,workHeight);
+            SetWindowPos(hwnd,nullptr,work.left+(workWidth-width)/2,work.top+(workHeight-height)/2,width,height,SWP_NOZORDER);
+        } else SetWindowPos(hwnd,nullptr,0,0,width,height,SWP_NOMOVE|SWP_NOZORDER);
         SetWindowSubclass(hwnd,windowProc,1,reinterpret_cast<DWORD_PTR>(this));
         WNDCLASSW wc{};wc.lpfnWndProc=controlProc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=shell::controlClass;
         RegisterClassW(&wc);
