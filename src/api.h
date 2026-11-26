@@ -20,6 +20,17 @@ typedef struct WzVolume {
     WzOptions options;
 } WzVolume;
 WZ_API int wz_mount(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
+typedef struct WzRecovery {
+    wchar_t id[64];
+    wchar_t archive[32768];
+    wchar_t folder[32768];
+} WzRecovery;
+WZ_API int wz_mount_password(const wchar_t* path, const WzOptions* options, const wchar_t* password, wchar_t* mount, unsigned mountSize);
+WZ_API int wz_password_required(void);
+WZ_API int wz_recovery_count(void);
+WZ_API int wz_recovery_get(int index, WzRecovery* info);
+WZ_API int wz_recovery_export(const wchar_t* id, const wchar_t* destination);
+WZ_API int wz_recovery_discard(const wchar_t* id);
 WZ_API int wz_mount_readonly(const wchar_t* path, const WzOptions* options, wchar_t* mount, unsigned mountSize);
 WZ_API int wz_save_copy(const wchar_t* mount, const wchar_t* destination);
 WZ_API int wz_discard(const wchar_t* mount);

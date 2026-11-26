@@ -23,6 +23,8 @@ try {
     }
     & $seven a -tzip (Join-Path $root 'encrypted.zip') '.\*' -pTestFixturePassword -mem=AES256 -y
     if ($LASTEXITCODE -ne 0) { throw 'Encrypted fixture failed' }
+    & $seven a -t7z (Join-Path $root 'encrypted.7z') '.\*' -pTestFixturePassword -mhe=on -y
+    if ($LASTEXITCODE -ne 0) { throw 'Header-encrypted fixture failed' }
     & $seven a -tzip (Join-Path $root 'ui.zip') '.\*' -y
     if ($LASTEXITCODE -ne 0) { throw 'UI ZIP fixture failed' }
     & $seven a -t7z (Join-Path $root 'tray.7z') '.\*' -y

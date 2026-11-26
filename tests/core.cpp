@@ -133,6 +133,45 @@ void safety(fs::path const& archive,const fs::path& directory) {
     require(wz_mount((root/L"nested.zip").c_str(),&o,buffer,16)==0,"reject recursive mount");
     waitClosed(drive);require(wz_discard(drive.c_str())==1,"discard copy");
 }
+void password(fs::path const& archive) {
+    WzOptions o{};wz_default_options(&o);
+    const auto before=read(archive);wchar_t mountPoint[16]{};
+    require(wz_mount(archive.c_str(),&o,mountPoint,16)==0&&wz_password_required(),"password prompt required");
+    require(wz_mount_password(archive.c_str(),&o,L"wrong-password",mountPoint,16)==0,"wrong password rejected");
+    require(wz_count()==0,"wrong password leaves no mount");
+    require(wz_mount_password(archive.c_str(),&o,L"TestFixturePassword",mountPoint,16)==1,"password mount");
+    std::wstring drive=mountPoint;
+    require(volume(drive).readOnly,"protected archive read-only");
+    require(read(fs::path(drive+L"\\")/L"sample.txt")=="original","decrypted data");
+    eject(drive);
+    require(read(archive)==before,"protected archive unchanged");
+}
+void recovery(fs::path const& archive,const fs::path& output) {
+    // Create an orphan through a child process which exits without unmounting.
+    wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
+    std::wstring command=L"\""+std::wstring(exe)+L"\" --crash-fixture \""+archive.wstring()+L"\"";
+    STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION child{};
+    require(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&child)!=0,"start recovery fixture");
+    CloseHandle(child.hThread);
+    DWORD wait=WaitForSingleObject(child.hProcess,30000),code=1;
+    GetExitCodeProcess(child.hProcess,&code);CloseHandle(child.hProcess);
+    require(wait==WAIT_OBJECT_0&&code==0,"recovery fixture completed");
+    int n=wz_recovery_count();require(n>0,"abandoned session found");
+    WzRecovery found{};bool match=false;
+    for(int i=0;i<n;++i) {
+        WzRecovery item{};require(wz_recovery_get(i,&item)==1,"read recovery entry");
+        if(fs::path(item.archive)==fs::canonical(archive)) {found=item;match=true;break;}
+    }
+    require(match,"recovery manifest matches");
+    require(wz_recovery_export(found.id,output.c_str())==1,"export recovery");
+    require(wz_recovery_export(found.id,output.c_str())==0,"do not overwrite recovery");
+    WzOptions o{};wz_default_options(&o);
+    auto drive=mount(output,o);
+    require(read(fs::path(drive+L"\\")/L"recovered.txt")=="unsaved after termination","recovered data");
+    eject(drive);
+    require(wz_recovery_discard(found.id)==1,"discard exported recovery session");
+    require(wz_recovery_discard(found.id)==0,"removed recovery unavailable");
+}
 void readonly(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);
     auto drive=mount(archive,o);auto root=drive+L"\\";
@@ -212,6 +251,14 @@ void idle(fs::path const& archive) {
 }
 int wmain(int argc,wchar_t** argv) {
     try {
+        if(argc==3&&std::wstring_view(argv[1])==L"--crash-fixture") {
+            WzOptions o{};wz_default_options(&o);o.batch=1;
+            auto drive=mount(argv[2],o);
+            write(fs::path(drive+L"\\")/L"recovered.txt","unsaved after termination");
+            waitClosed(drive);
+            TerminateProcess(GetCurrentProcess(),0);
+            return 1;
+        }
         WzOptions o{};wz_default_options(&o);
         require(o.delaySeconds==5 && o.level==5 && wz_count()==0,"defaults");
         wchar_t drive[16]{},error[512]{};
@@ -232,6 +279,8 @@ int wmain(int argc,wchar_t** argv) {
             }
             fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
             conflict(root/L"conflict.zip");
+            password(root/L"encrypted.zip");password(root/L"encrypted.7z");
+            recovery(root/L"ui.zip",root/L"recovered.zip");
             fs::copy_file(root/L"ui.zip",root/L"safety.zip",fs::copy_options::overwrite_existing);
             safety(root/L"safety.zip",root);
             idle(root/L"idle.zip");

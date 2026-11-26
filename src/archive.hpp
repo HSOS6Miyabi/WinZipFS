@@ -95,11 +95,14 @@ inline bool archiveReadOnly(const BitArchiveReader& reader) {
            nonzero(reader.archiveProperty(BitProperty::EmbeddedStubSize)) ||
            nonzero(reader.archiveProperty(BitProperty::WarningFlags));
 }
-inline bool validate(const BitArchiveReader& reader,const fs::path& root) {
+struct PasswordRequired : std::runtime_error {
+    PasswordRequired():std::runtime_error("A password is required or the password is incorrect") {}
+};
+inline bool validate(const BitArchiveReader& reader,const fs::path& root,bool allowEncrypted=false) {
     std::map<std::wstring,bool,CaseLess> names, prefixes;
     uint64_t total=0;
     bool metadataSensitive=false;
-    if(reader.hasEncryptedItems()) throw std::runtime_error("Encrypted archives require a password");
+    if(reader.hasEncryptedItems()&&!allowEncrypted) throw PasswordRequired();
     for(const auto& item:reader.items()) {
         if(item.isSymLink() || (item.attributes() & FILE_ATTRIBUTE_REPARSE_POINT) ||
            present(reader.itemProperty(item.index(),BitProperty::HardLink)) ||
@@ -204,10 +207,11 @@ inline void extractStandalone(const BitArchiveReader& reader,const fs::path& sou
         }
     }
 }
-inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root) {
+inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root,const std::string& password={}) {
     Format fmt;
-    {
-        BitArchiveReader outer(lib,path8(source),BitFormat::Auto);
+    try {
+        BitArchiveReader outer(lib,path8(source),BitFormat::Auto,password);
+        if(outer.hasEncryptedItems()&&password.empty()) throw PasswordRequired();
         fmt=formatFor(source,outer.detectedFormat());
         auto name=lower(source.filename().wstring());
         bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
@@ -222,13 +226,18 @@ inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::p
             fmt={};
             extractStandalone(outer,source,root);
         } else {
-            if(validate(outer,root) || archiveReadOnly(outer))
+            if(validate(outer,root,!password.empty()) || archiveReadOnly(outer))
                 fmt={};
             if(outer.itemsCount()) outer.extractTo(path8(root));
         }
+    } catch(const BitException& e) {
+        if(e.code()==BitFailureSource::WrongPassword ||
+           (password.empty()&&BitArchiveReader::isHeaderEncrypted(lib,path8(source),BitFormat::Auto)))
+            throw PasswordRequired();
+        throw;
     }
     verifyTree(root);
-    if(!isWritable(source)) fmt={};
+    if(!password.empty()||!isWritable(source)) fmt={};
     return fmt;
 }
 inline void configure(BitArchiveWriter& writer,const BitInOutFormat& fmt,const WzOptions& o) {

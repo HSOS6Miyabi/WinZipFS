@@ -17,6 +17,7 @@
 
 namespace wz {
 thread_local std::wstring error;
+thread_local bool passwordRequired=false;
 std::mutex manager;
 std::unique_ptr<Bit7zLibrary> engine;
 inline std::wstring guid() {
@@ -47,6 +48,30 @@ struct FileHandle {
     FileHandle& operator=(const FileHandle&)=delete;
     ~FileHandle() {if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);}
 };
+struct Secret {
+    std::string value;
+    explicit Secret(const wchar_t* password):value(password?utf8(password):std::string{}) {}
+    ~Secret() {if(!value.empty()) SecureZeroMemory(value.data(),value.size());}
+};
+inline bool ordinaryDirectory(const fs::path& path) {
+    auto attr=GetFileAttributesW(path.c_str());
+    return attr!=INVALID_FILE_ATTRIBUTES && (attr&FILE_ATTRIBUTE_DIRECTORY) && !(attr&FILE_ATTRIBUTE_REPARSE_POINT);
+}
+inline void marker(const fs::path& path) {
+    std::ofstream out(path,std::ios::binary|std::ios::trunc);
+    out<<"1";
+    out.close();
+    if(!out) throw std::runtime_error("Cannot write session recovery metadata");
+}
+inline std::unique_ptr<FileHandle> lockCache(const fs::path& cache) {
+    if(!ordinaryDirectory(cache)) return {};
+    auto lock=std::make_unique<FileHandle>(CreateFileW((cache/L"session.lock").c_str(),
+        GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    if(lock->value==INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if(!GetFileInformationByHandle(lock->value,&info)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) return {};
+    return lock;
+}
 struct Fingerprint {
     BY_HANDLE_FILE_INFORMATION info{};
     explicit Fingerprint(HANDLE h) {
@@ -72,6 +97,25 @@ inline void checkOptions(const WzOptions& o) {
        (o.level!=0&&o.level!=1&&o.level!=3&&o.level!=5&&o.level!=7&&o.level!=9)||
        o.method<0||o.method>4||o.threads<0||o.threads>256) throw std::runtime_error("Invalid compression or cache settings");
 }
+inline void exportTree(const fs::path& root,const fs::path& destination,WzOptions options) {
+    auto target=fs::absolute(destination);
+    auto ext=lower(target.extension().wstring());
+    Format copyFormat{ext==L".zip"?&BitFormat::Zip:ext==L".7z"?&BitFormat::SevenZip:nullptr};
+    if(!copyFormat.inner) throw std::runtime_error("Choose a .zip or .7z destination");
+    if(fs::exists(target)) throw std::runtime_error("The destination already exists");
+    if(!ordinaryDirectory(target.parent_path())) throw std::runtime_error("The destination directory does not exist");
+    auto temp=target.parent_path()/(L".winzipfs-"+guid()+L".tmp"+target.extension().wstring());
+    TemporaryFile cleanup(temp);
+    options.method=0;
+    pack(lib(),root,temp,root.parent_path()/L"copy.tar",copyFormat,options);
+    {
+        FileHandle out(CreateFileW(temp.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+        if(out.value==INVALID_HANDLE_VALUE||!FlushFileBuffers(out.value))
+            throw std::runtime_error("Cannot flush the exported archive");
+    }
+    if(!MoveFileExW(temp.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("Cannot create the requested archive copy");
+}
 struct Session {
     fs::path original, cache, root;
     Fingerprint fingerprint;
@@ -81,20 +125,27 @@ struct Session {
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
     bool mounted=false;
+    std::unique_ptr<FileHandle> lease;
     unsigned long long retryAfter=0;
     std::wstring notifiedError;
-    Session(const fs::path& p,const WzOptions& o,bool forceReadOnly):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
+    Session(const fs::path& p,const WzOptions& o,bool forceReadOnly,const wchar_t* password):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
         checkOptions(o);
         cache=local()/guid(); root=cache/L"files";
         fs::create_directories(root);
         try {
+            lease=lockCache(cache);
+            if(!lease) throw std::runtime_error("Cannot lock the archive cache");
+            Secret secret(password);
+            if(!secret.value.empty()) marker(cache/L"sensitive");
             std::ofstream manifest(cache/L"archive.txt",std::ios::binary);
             manifest<<path8(original)<<"\n"; manifest.close();
-            format=extract(lib(),original,root);
+            if(!manifest) throw std::runtime_error("Cannot write session metadata");
+            format=extract(lib(),original,root,secret.value);
             if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed while opening");
             if(forceReadOnly) format={};
             ptfs.readOnly=!format.inner;
             ptfs.label=original.filename().wstring();
+            marker(cache/L"ready");
             auto s=root.wstring();
             if(!NT_SUCCESS(ptfs.SetPath(s.data()))) throw std::runtime_error("Cannot open cache directory");
             DWORD used=GetLogicalDrives();
@@ -108,11 +159,13 @@ struct Session {
             if(ptfs.readOnly) status=L"Read-only";
         } catch(...) {
             if(mounted) host.Unmount();
+            lease.reset();
             std::error_code ec;fs::remove_all(cache,ec);throw;
         }
     }
     ~Session() {
         if(mounted) host.Unmount();
+        lease.reset();
         if(!ptfs.dirty) { std::error_code ec;fs::remove_all(cache,ec); }
     }
     void commitFrozen() {
@@ -172,23 +225,7 @@ struct Session {
     void exportCopy(const fs::path& destination) {
         freeze();
         try {
-            auto target=fs::absolute(destination);
-            auto ext=lower(target.extension().wstring());
-            Format copyFormat{ext==L".zip"?&BitFormat::Zip:ext==L".7z"?&BitFormat::SevenZip:nullptr};
-            if(!copyFormat.inner) throw std::runtime_error("Choose a .zip or .7z destination");
-            if(fs::exists(target)) throw std::runtime_error("The destination already exists");
-            if(!fs::is_directory(target.parent_path())) throw std::runtime_error("The destination directory does not exist");
-            auto temp=target.parent_path()/(L".winzipfs-"+guid()+L".tmp"+target.extension().wstring());
-            TemporaryFile cleanup(temp);
-            WzOptions copyOptions=options;
-            copyOptions.method=0;
-            pack(lib(),root,temp,cache/L"copy.tar",copyFormat,copyOptions);
-            FileHandle out(CreateFileW(temp.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,
-                                       nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
-            if(out.value==INVALID_HANDLE_VALUE||!FlushFileBuffers(out.value))
-                throw std::runtime_error("Cannot flush the exported archive");
-            if(!MoveFileExW(temp.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))
-                throw std::runtime_error("Cannot create the requested archive copy");
+            exportTree(root,destination,options);
             ptfs.Touch();ptfs.closing=false;
         } catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
@@ -215,8 +252,9 @@ Session& find(const wchar_t* d) {
 }
 template<class F> int call(F&& f) {
     std::lock_guard lock(manager);
-    error.clear();
+    error.clear();passwordRequired=false;
     try {f();return 1;}
+    catch(const PasswordRequired& e) {passwordRequired=true;error=wide(e.what());return 0;}
     catch(const std::exception& e) {error=wide(e.what());return 0;}
     catch(...) {error=L"Unexpected filesystem error";return 0;}
 }
@@ -237,7 +275,7 @@ inline void independentPath(const fs::path& p) {
     }
     if(inside(p,local())) throw std::runtime_error("Choose a path outside the recovery cache");
 }
-inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size,bool ro) {
+inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size,bool ro,const wchar_t* password=nullptr) {
     if(!path||!o||!mount||size<3) throw std::runtime_error("Missing archive path, options or mount buffer");
     auto abs=fs::absolute(path);
     independentPath(abs);
@@ -251,8 +289,51 @@ inline void mountImpl(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsi
         }
     }
     if(!NT_SUCCESS(Fsp::Initialize())) throw std::runtime_error("WinFsp is not installed");
-    auto session=std::make_unique<Session>(p,*o,ro);
+    auto session=std::make_unique<Session>(p,*o,ro,password);
     copy(mount,size,session->drive);sessions.push_back(std::move(session));
+}
+inline bool validId(std::wstring_view id) {
+    if(id.size()!=38||id.front()!=L'{'||id.back()!=L'}') return false;
+    for(size_t i=1;i<37;++i) {
+        if(i==9||i==14||i==19||i==24) {if(id[i]!=L'-') return false;}
+        else if(!iswxdigit(id[i])) return false;
+    }
+    return true;
+}
+inline bool ordinaryFile(const fs::path& file) {
+    auto attr=GetFileAttributesW(file.c_str());
+    return attr!=INVALID_FILE_ATTRIBUTES && !(attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT));
+}
+inline bool validRecovery(const fs::path& cache) {
+    return validId(cache.filename().wstring())&&ordinaryDirectory(cache)&&
+           ordinaryDirectory(cache/L"files")&&ordinaryFile(cache/L"ready")&&
+           ordinaryFile(cache/L"archive.txt")&&!fs::exists(cache/L"sensitive");
+}
+inline std::vector<fs::path> recoveries() {
+    std::vector<fs::path> result;
+    auto directory=local();
+    if(!ordinaryDirectory(directory)) return result;
+    std::error_code ec;
+    for(const auto& entry:fs::directory_iterator(directory,ec)) {
+        auto path=entry.path();
+        if(!validId(path.filename().wstring())||!ordinaryDirectory(path)) continue;
+        auto lease=lockCache(path);
+        if(!lease) continue;
+        // Password-protected volumes are read-only. A terminated session cannot
+        // have unsaved archive modifications, so remove its decrypted cache.
+        if(ordinaryFile(path/L"sensitive")) {
+            lease.reset();fs::remove_all(path,ec);ec.clear();continue;
+        }
+        if(validRecovery(path)) result.push_back(path);
+    }
+    std::sort(result.begin(),result.end());
+    return result;
+}
+inline fs::path recoveryPath(const wchar_t* id) {
+    if(!id||!validId(id)) throw std::runtime_error("Invalid recovery session");
+    auto path=local()/id;
+    if(!validRecovery(path)) throw std::runtime_error("Recovery session unavailable");
+    return path;
 }
 }
 extern "C" {
@@ -260,6 +341,57 @@ void wz_default_options(WzOptions* o) {if(o)*o={0,5,0,5,0,0,1};}
 const wchar_t* wz_extensions() {return L".zip;.zipx;.7z;.rar;.tar;.gz;.gzip;.tgz;.bz2;.bzip2;.tbz;.tbz2;.xz;.txz;.zst;.tzst;.cab;.arj;.lha;.lzh;.z;.cpio;.deb;.rpm;.iso;.wim;.swm;.esd;.dmg;.xar;.ar;.001;.chm;.lzma;.udf;.squashfs";}
 int wz_mount(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size) {
     return wz::call([&]{wz::mountImpl(path,o,mount,size,false);});
+}
+int wz_mount_password(const wchar_t* path,const WzOptions* o,const wchar_t* password,wchar_t* mount,unsigned size) {
+    return wz::call([&]{
+        if(!password||!*password) throw wz::PasswordRequired();
+        wz::mountImpl(path,o,mount,size,true,password);
+    });
+}
+int wz_password_required() {return wz::passwordRequired?1:0;}
+int wz_recovery_count() {
+    int count=0;
+    if(!wz::call([&]{count=static_cast<int>(wz::recoveries().size());})) return -1;
+    return count;
+}
+int wz_recovery_get(int index,WzRecovery* out) {
+    return wz::call([&]{
+        auto paths=wz::recoveries();
+        if(!out||index<0||index>=int(paths.size())) throw std::runtime_error("Invalid recovery index");
+        auto path=paths[index];auto lease=wz::lockCache(path);
+        if(!lease) throw std::runtime_error("Recovery session is active");
+        std::ifstream manifest(path/L"archive.txt",std::ios::binary);
+        std::string source;
+        std::getline(manifest,source);
+        if(source.empty()||source.size()>131072) throw std::runtime_error("Invalid recovery metadata");
+        *out={};
+        wz::copy(out->id,64,path.filename().wstring());
+        wz::copy(out->archive,32768,wz::wide(source));
+        wz::copy(out->folder,32768,(path/L"files").wstring());
+    });
+}
+int wz_recovery_export(const wchar_t* id,const wchar_t* destination) {
+    return wz::call([&]{
+        if(!destination||!*destination) throw std::runtime_error("Choose an export destination");
+        auto path=wz::recoveryPath(id);auto lease=wz::lockCache(path);
+        if(!lease) throw std::runtime_error("Recovery session is active");
+        auto target=wz::fs::absolute(destination);auto parent=wz::fs::canonical(target.parent_path());
+        wz::independentPath(target);wz::independentPath(parent);
+        WzOptions o{};wz_default_options(&o);
+        wz::exportTree(path/L"files",parent/target.filename(),o);
+    });
+}
+int wz_recovery_discard(const wchar_t* id) {
+    return wz::call([&]{
+        auto path=wz::recoveryPath(id);auto lease=wz::lockCache(path);
+        if(!lease) throw std::runtime_error("Recovery session is active");
+        // Move the session outside the recovery namespace before deletion.
+        lease.reset();
+        auto removed=path.parent_path()/(L"discarded-"+wz::guid());
+        if(!MoveFileExW(path.c_str(),removed.c_str(),MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Cannot remove the recovery session");
+        wz::fs::remove_all(removed);
+    });
 }
 int wz_mount_readonly(const wchar_t* path,const WzOptions* o,wchar_t* mount,unsigned size) {
     return wz::call([&]{wz::mountImpl(path,o,mount,size,true);});
