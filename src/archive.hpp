@@ -137,20 +137,23 @@ inline bool isWritable(const fs::path& path) {
     CloseHandle(h); return true;
 }
 inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root) {
-    BitArchiveReader outer(lib,path8(source),BitFormat::Auto);
-    auto fmt=formatFor(source,outer.detectedFormat());
-    auto name=lower(source.filename().wstring());
-    bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
-    if(fmt.outer||zstdTar) {
-        if(outer.itemsCount()!=1 || outer.isItemFolder(0)) throw std::runtime_error("Invalid compressed TAR");
-        bool outerMetadata=validate(outer,root)||outer.isMultiVolume();
-        BitArchiveReader inner(lib,outer,0,BitFormat::Tar);
-        if(validate(inner,root)||outerMetadata||zstdTar) fmt={};
-        if(inner.itemsCount()) inner.extractTo(path8(root));
-    } else {
-        if(validate(outer,root) || outer.isMultiVolume() || present(outer.archiveProperty(BitProperty::Comment)))
-            fmt={};
-        if(outer.itemsCount()) outer.extractTo(path8(root));
+    Format fmt;
+    {
+        BitArchiveReader outer(lib,path8(source),BitFormat::Auto);
+        fmt=formatFor(source,outer.detectedFormat());
+        auto name=lower(source.filename().wstring());
+        bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
+        if(fmt.outer||zstdTar) {
+            if(outer.itemsCount()!=1 || outer.isItemFolder(0)) throw std::runtime_error("Invalid compressed TAR");
+            bool outerMetadata=validate(outer,root)||outer.isMultiVolume();
+            BitArchiveReader inner(lib,outer,0,BitFormat::Tar);
+            if(validate(inner,root)||outerMetadata||zstdTar) fmt={};
+            if(inner.itemsCount()) inner.extractTo(path8(root));
+        } else {
+            if(validate(outer,root) || outer.isMultiVolume() || present(outer.archiveProperty(BitProperty::Comment)))
+                fmt={};
+            if(outer.itemsCount()) outer.extractTo(path8(root));
+        }
     }
     verifyTree(root);
     if(!isWritable(source)) fmt={};
