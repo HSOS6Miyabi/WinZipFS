@@ -220,8 +220,8 @@ class Dashboard {
             dialog.CloseButtonText(L"Cancel");
             dialog.DefaultButton(ContentDialogButton::Primary);
             dialog.IsPrimaryButtonEnabled(false);
-            auto token=password.PasswordChanged([dialog](IInspectable const& sender,auto&&){
-                dialog.IsPrimaryButtonEnabled(!sender.as<PasswordBox>().Password().empty());
+            auto token=password.PasswordChanged([dialog,password](auto&&,auto&&){
+                dialog.IsPrimaryButtonEnabled(!password.Password().empty());
             });
             auto result=co_await dialog.ShowAsync();
             password.PasswordChanged(token);
