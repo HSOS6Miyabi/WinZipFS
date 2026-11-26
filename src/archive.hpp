@@ -113,6 +113,7 @@ inline void verifyTree(const fs::path& root) {
         if(attr==INVALID_FILE_ATTRIBUTES || (attr&FILE_ATTRIBUTE_REPARSE_POINT))
             throw std::runtime_error("Reparse points cannot be mounted");
         if(!e.is_directory()&&!e.is_regular_file()) throw std::runtime_error("Unsupported cache entry");
+        safeName(e.path().lexically_relative(root).wstring(),e.is_directory());
     }
 }
 struct Format {

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <string>
 #include <strsafe.h>
+#include "archive.hpp"
 
 #define PROGNAME                        "passthrough-cpp"
 
@@ -36,7 +37,14 @@
 #define warn(format, ...)               Service::Log(EVENTLOG_WARNING_TYPE, format, __VA_ARGS__)
 #define fail(format, ...)               Service::Log(EVENTLOG_ERROR_TYPE, format, __VA_ARGS__)
 
-#define ConcatPath(FN, FP)              (0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", _Path, FN))
+inline bool ValidVolumePath(const wchar_t* name)
+{
+    if (!name || name[0] != L'\\') return false;
+    if (!name[1]) return true;
+    try { return !wz::safeName(name + 1, false).empty(); }
+    catch (...) { return false; }
+}
+#define ConcatPath(FN, FP)              (ValidVolumePath(FN) && 0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", _Path, FN))
 #define HandleFromFileDesc(FD)          ((PtfsFileDesc *)(FD))->Handle
 
 using namespace Fsp;
@@ -220,7 +228,7 @@ NTSTATUS Ptfs::SetPath(PWSTR Path)
     Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
     if (0 == Length || Length >= FULLPATH_SIZE - 1)
     {
-        LastError = GetLastError();
+        LastError = Length ? ERROR_FILENAME_EXCED_RANGE : GetLastError();
         CloseHandle(Handle);
         return NtStatusFromWin32(LastError);
     }

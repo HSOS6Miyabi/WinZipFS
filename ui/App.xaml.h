@@ -1,11 +1,9 @@
 #pragma once
-#include "App.g.h"
+#include "pch.h"
+#include "App.xaml.g.h"
 namespace winrt::WinZipFS::implementation {
 struct App : AppT<App> {
     App();
     void OnLaunched(Microsoft::UI::Xaml::LaunchActivatedEventArgs const&);
 };
-}
-namespace winrt::WinZipFS::factory_implementation {
-struct App : AppT<App,implementation::App> {};
 }
