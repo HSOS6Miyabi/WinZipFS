@@ -445,10 +445,17 @@ def test_settings():
     click("Eject")
     status_contains("Ejected")
     wait_for(lambda: not root.exists(), "Ejected drive still exists")
-    exit_application()
-    start_application()
-    assert current_options() == (0, 3, 0, 1, 0, 1, 1)
-    exit_application()
+    # Keep an external reference across shutdown to reproduce a named mutex
+    # that still exists after its primary process exits.
+    import win32event
+    retained_mutex = win32event.OpenMutex(0x00100000, False, r"Local\WinZipFS.Instance")
+    try:
+        exit_application()
+        start_application()
+        assert current_options() == (0, 3, 0, 1, 0, 1, 1)
+        exit_application()
+    finally:
+        retained_mutex.Close()
 
 
 def test_tray_picker():

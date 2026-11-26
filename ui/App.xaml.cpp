@@ -13,15 +13,31 @@ void App::OnLaunched(Microsoft::UI::Xaml::LaunchActivatedEventArgs const&) {
             ExitProcess(0);
         }catch(...) {ExitProcess(1);}
     }
-    static HANDLE instance=CreateMutexW(nullptr,FALSE,L"Local\\WinZipFS.Instance");
+    static HANDLE instance=nullptr;
+    instance=CreateMutexW(nullptr,TRUE,L"Local\\WinZipFS.Instance");
     if(!instance) {
         MessageBoxW(nullptr,L"Cannot initialize the application instance.",L"WinZipFS",MB_ICONERROR);
         Exit();return;
     }
     const bool existing=GetLastError()==ERROR_ALREADY_EXISTS;
     if(existing) {
-        if(!shell::forward(args)) MessageBoxW(nullptr,L"Cannot contact the running WinZipFS instance.",L"WinZipFS",MB_ICONERROR);
-        Exit();return;
+        auto acquired=[] {
+            DWORD result=WaitForSingleObject(instance,0);
+            return result==WAIT_OBJECT_0||result==WAIT_ABANDONED;
+        };
+        // A referenced mutex can outlive its former owner. Only ownership
+        // indicates that another primary instance is still running.
+        if(!acquired()) {
+            if(shell::forward(args)) {
+                CloseHandle(instance);instance=nullptr;
+                Exit();return;
+            }
+            if(!acquired()) {
+                CloseHandle(instance);instance=nullptr;
+                MessageBoxW(nullptr,L"Cannot contact the running WinZipFS instance.",L"WinZipFS",MB_ICONERROR);
+                Exit();return;
+            }
+        }
     }
     static std::unique_ptr<Dashboard> dashboard;
     dashboard=std::make_unique<Dashboard>(std::move(args));
