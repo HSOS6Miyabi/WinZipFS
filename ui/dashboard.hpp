@@ -61,8 +61,13 @@ class Dashboard {
     WzOptions defaults=shell::loadDefaults();
     std::vector<WzVolume> rows;
     std::wstring selected;
-    bool rebuilding=false,busy=false,quitting=false,noExplorer=false,trayReady=false;
-    struct Job {std::function<std::wstring()> action;bool quiet=false,exit=false;};
+    bool rebuilding=false,busy=false,quitting=false,noExplorer=false,trayReady=false,dialogOpen=false;
+    struct SecretText {
+        std::wstring value;
+        explicit SecretText(std::wstring text):value(std::move(text)) {}
+        ~SecretText(){if(!value.empty()) SecureZeroMemory(value.data(),value.size()*sizeof(wchar_t));}
+    };
+    struct Job {std::function<std::wstring()> action;bool quiet=false,exit=false;std::function<void()> passwordRetry;};
     std::deque<Job> jobs;
     static constexpr UINT trayMessage=WM_APP+1;
     static constexpr int levels[]={0,1,3,5,7,9};
@@ -123,7 +128,7 @@ class Dashboard {
         details.Text(hs(s));
         openBtn.IsEnabled(r!=nullptr);ejectBtn.IsEnabled(r!=nullptr);
         applyBtn.IsEnabled(r!=nullptr);flushBtn.IsEnabled(r&&!r->readOnly);
-        exportBtn.IsEnabled(r!=nullptr);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
+        exportBtn.IsEnabled(r&&!r->protectedArchive);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
     }
     void refresh() {
         std::vector<WzVolume> updated;
@@ -162,15 +167,18 @@ class Dashboard {
         updateDetails();
     }
     fire_and_forget startNext() {
-        if(busy||jobs.empty()||quitting) co_return;
+        if(busy||jobs.empty()||quitting||dialogOpen) co_return;
         busy=true;
         auto job=std::move(jobs.front());jobs.pop_front();
         if(!job.quiet) {progress.IsActive(true);say(L"Working…");}
         apartment_context ui;
         co_await resume_background();
         std::wstring result;
-        bool failed=false;
-        try {result=job.action();if(result.starts_with(L"Error: ")) failed=true;}
+        bool failed=false,requestPassword=false;
+        try {
+            result=job.action();if(result.starts_with(L"Error: ")) failed=true;
+            requestPassword=failed&&job.passwordRetry&&wz_password_required();
+        }
         catch(hresult_error const& e) {result=L"Error: "+ws(e.message());failed=true;}
         catch(std::exception const&) {result=L"Error: Invalid operation or settings";failed=true;}
         catch(...) {result=L"Error: Unexpected operation failure";failed=true;}
@@ -187,21 +195,59 @@ class Dashboard {
             co_return;
         }
         refresh();
+        if(requestPassword) job.passwordRetry();
         startNext();
     }
-    void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false) {
-        jobs.push_back({std::move(action),quiet,exit});startNext();
+    void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false,std::function<void()> retry={}) {
+        jobs.push_back({std::move(action),quiet,exit,std::move(retry)});startNext();
     }
-    void mountPath(std::wstring path,bool readOnly=false) {
+    fire_and_forget promptPassword(std::wstring path) {
+        if(dialogOpen) co_return;
+        dialogOpen=true;
+        try {
+            show();
+            auto dialog=identify(ContentDialog{},L"PasswordDialog");
+            dialog.XamlRoot(window.Content().as<FrameworkElement>().XamlRoot());
+            dialog.Title(box_value(L"Protected archive"));
+            auto body=vertical(12);
+            body.Children().Append(text(std::filesystem::path(path).filename().wstring(),16,true));
+            body.Children().Append(text(L"Enter the password to mount this archive read-only. Decrypted files are cached locally while mounted; the cache is removed on eject or the next startup after an unexpected exit."));
+            auto password=identify(PasswordBox{},L"ArchivePassword");
+            password.Header(box_value(L"Archive password"));
+            body.Children().Append(password);
+            dialog.Content(body);
+            dialog.PrimaryButtonText(L"Mount read-only");
+            dialog.CloseButtonText(L"Cancel");
+            dialog.DefaultButton(ContentDialogButton::Primary);
+            dialog.IsPrimaryButtonEnabled(false);
+            password.PasswordChanged([dialog,password](auto&&,auto&&){dialog.IsPrimaryButtonEnabled(!password.Password().empty());});
+            auto result=co_await dialog.ShowAsync();
+            std::shared_ptr<SecretText> secret;
+            if(result==ContentDialogResult::Primary) secret=std::make_shared<SecretText>(ws(password.Password()));
+            password.Password(L"");
+            dialogOpen=false;
+            if(secret) mountPath(std::move(path),true,std::move(secret));
+            else say(L"Archive mount cancelled.");
+        } catch(hresult_error const& e) {
+            dialogOpen=false;say(L"Error: "+ws(e.message()));
+        } catch(...) {
+            dialogOpen=false;say(L"Error: Cannot open password dialog.");
+        }
+        startNext();
+    }
+    void mountPath(std::wstring path,bool readOnly=false,std::shared_ptr<SecretText> secret={}) {
         if(path.empty()) return;
         auto opt=defaults;bool explorer=!noExplorer;
-        queue([path=std::move(path),opt,explorer,readOnly] {
+        auto retryPath=path;
+        queue([path=std::move(path),opt,explorer,readOnly,secret=std::move(secret)] {
             wchar_t drive[16]{};
-            if(!(readOnly?wz_mount_readonly(path.c_str(),&opt,drive,16):wz_mount(path.c_str(),&opt,drive,16))) return L"Error: "+coreError();
+            int ok=secret?wz_mount_password(path.c_str(),&opt,secret->value.c_str(),drive,16):
+                   readOnly?wz_mount_readonly(path.c_str(),&opt,drive,16):wz_mount(path.c_str(),&opt,drive,16);
+            if(!ok) return L"Error: "+coreError();
             std::wstring result=L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
             if(explorer&&!shell::open(std::wstring(drive)+L"\\")) result+=L" (Explorer could not be opened)";
             return result;
-        });
+        },false,false,[this,retryPath]{promptPassword(retryPath);});
     }
     void browse(bool readOnly=false) {
         try {auto p=shell::pick(hwnd);if(!p.empty())mountPath(std::move(p),readOnly);}
@@ -222,6 +268,57 @@ class Dashboard {
                 return wz_save_copy(drive.c_str(),destination.c_str())?L"Saved copy: "+destination:L"Error: "+coreError();
             });
         }catch(hresult_error const& e){say(L"Error: "+ws(e.message()));}
+    }
+    fire_and_forget recoveryDialog() {
+        if(dialogOpen||busy) {say(L"An operation is already in progress.");co_return;}
+        dialogOpen=true;
+        try {
+            show();
+            std::vector<WzRecovery> entries;
+            int count=wz_recovery_count();
+            if(count<0) throw std::runtime_error("Cannot read recovery sessions");
+            for(int i=0;i<count;++i) {
+                WzRecovery entry{};
+                if(wz_recovery_get(i,&entry)) entries.push_back(entry);
+            }
+            if(entries.empty()) {
+                say(L"No abandoned archive sessions to recover.");
+                dialogOpen=false;startNext();co_return;
+            }
+            auto dialog=identify(ContentDialog{},L"RecoveryDialog");
+            dialog.XamlRoot(window.Content().as<FrameworkElement>().XamlRoot());
+            dialog.Title(box_value(L"Recover archive files"));
+            auto body=vertical(12);
+            body.Children().Append(text(L"These local files remain from a previous session. Save a new archive copy to recover the contents without replacing the original."));
+            auto items=identify(ListView{},L"RecoveryList");
+            items.SelectionMode(ListViewSelectionMode::Single);items.MaxHeight(300);items.MinHeight(100);
+            for(const auto& entry:entries) items.Items().Append(box_value(hs(entry.archive)));
+            items.SelectedIndex(0);body.Children().Append(items);dialog.Content(body);
+            dialog.PrimaryButtonText(L"Save recovered copy…");
+            dialog.SecondaryButtonText(L"Delete recovery cache…");
+            dialog.CloseButtonText(L"Close");
+            auto result=co_await dialog.ShowAsync();
+            int index=items.SelectedIndex();
+            dialogOpen=false;
+            if(index>=0&&index<int(entries.size())) {
+                auto entry=entries[index];
+                std::wstring id=entry.id;
+                if(result==ContentDialogResult::Primary) {
+                    auto suggested=std::filesystem::path(entry.archive).stem().wstring()+L" - recovered.zip";
+                    auto destination=shell::pickSave(hwnd,suggested);
+                    if(!destination.empty()) queue([id,destination]{
+                        return wz_recovery_export(id.c_str(),destination.c_str())?
+                            L"Recovered copy: "+destination:L"Error: "+coreError();
+                    });
+                } else if(result==ContentDialogResult::Secondary) {
+                    if(MessageBoxW(hwnd,L"Permanently remove this recovered cache? Save a recovered copy first if you need the files.",
+                                   L"WinZipFS - Delete recovery cache",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES)
+                        queue([id]{return wz_recovery_discard(id.c_str())?std::wstring(L"Recovery cache removed."):L"Error: "+coreError();});
+                }
+            }
+        } catch(hresult_error const& e) {dialogOpen=false;say(L"Error: "+ws(e.message()));}
+        catch(...) {dialogOpen=false;say(L"Error: Cannot access recovery sessions.");}
+        startNext();
     }
     void discard(std::wstring drive) {
         if(drive.empty()) return;
@@ -304,7 +401,7 @@ class Dashboard {
             },MF_STRING|(opt.batch?MF_CHECKED:MF_UNCHECKED)|(readOnly?MF_GRAYED:0));
             add(sub,L"Save changes",[this,drive]{save(drive,false);},MF_STRING|(readOnly?MF_GRAYED:0));
             add(sub,L"Eject",[this,drive]{save(drive,true);});
-            add(sub,L"Save archive copy…",[this,drive]{exportCopy(drive);});
+            add(sub,L"Save archive copy…",[this,drive]{exportCopy(drive);},MF_STRING|(r.protectedArchive?MF_GRAYED:0));
             add(sub,L"Discard changes and eject…",[this,drive]{discard(drive);},MF_STRING|(!readOnly&&r.dirty?0:MF_GRAYED));
             auto title=drive+L"  "+std::filesystem::path(r.archive).filename().wstring();
             AppendMenuW(root,MF_POPUP,reinterpret_cast<UINT_PTR>(sub),title.c_str());
@@ -426,7 +523,7 @@ class Dashboard {
         systemDefaultsBtn=button(L"Default apps",L"DefaultApps");
         associations.Children().Append(registerBtn);associations.Children().Append(unregisterBtn);
         associations.Children().Append(systemDefaultsBtn);integrations.Children().Append(associations);
-        recoveryBtn=button(L"Open recovery cache",L"Recovery");integrations.Children().Append(recoveryBtn);
+        recoveryBtn=button(L"Recover archive files…",L"Recovery");integrations.Children().Append(recoveryBtn);
         page.Children().Append(card(integrations));
         auto scroll=identify(ScrollViewer{},L"DashboardScroll");scroll.Content(page);scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
         scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
@@ -451,13 +548,7 @@ class Dashboard {
         registerBtn.Click([this](auto&&,auto&&){try{shell::registerAssociations();say(L"Archive file types registered.");}catch(...){say(L"Error: Cannot register file types.");}});
         unregisterBtn.Click([this](auto&&,auto&&){shell::unregisterAssociations();say(L"Archive file type registration removed.");});
         systemDefaultsBtn.Click([this](auto&&,auto&&){say(shell::open(L"ms-settings:defaultapps")?L"Opened Windows default apps.":L"Error: Windows default apps settings unavailable.");});
-        recoveryBtn.Click([this](auto&&,auto&&){
-            PWSTR p=nullptr;if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&p))) {
-                std::filesystem::path path(p);CoTaskMemFree(p);path/=L"WinZipFS";path/=L"cache";
-                std::error_code ec;std::filesystem::create_directories(path,ec);
-                if(!ec&&shell::open(path.wstring())) say(L"Opened recovery cache.");else say(L"Error: Cannot open recovery cache.");
-            } else say(L"Error: Cannot locate recovery cache.");
-        });
+        recoveryBtn.Click([this](auto&&,auto&&){recoveryDialog();});
         load(defaults);updateDetails();
     }
 public:
@@ -488,6 +579,8 @@ public:
             if(arg==L"--background")background=true;
         }
         window.Activate();if(background)hide();
+        int recovered=wz_recovery_count();
+        if(recovered>0) say(L"Recovered archive sessions are available. Select Recover archive files to save their contents.");
         timer.Interval(std::chrono::seconds(2));
         timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{return wz_tick()?std::wstring{}:L"Error: "+coreError();},true);});
         timer.Start();

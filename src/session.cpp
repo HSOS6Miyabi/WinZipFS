@@ -124,7 +124,7 @@ struct Session {
     Ptfs ptfs;
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
-    bool mounted=false;
+    bool mounted=false,protectedArchive=false;
     std::unique_ptr<FileHandle> lease;
     unsigned long long retryAfter=0;
     std::wstring notifiedError;
@@ -136,7 +136,8 @@ struct Session {
             lease=lockCache(cache);
             if(!lease) throw std::runtime_error("Cannot lock the archive cache");
             Secret secret(password);
-            if(!secret.value.empty()) marker(cache/L"sensitive");
+            protectedArchive=!secret.value.empty();
+            if(protectedArchive) marker(cache/L"sensitive");
             std::ofstream manifest(cache/L"archive.txt",std::ios::binary);
             manifest<<path8(original)<<"\n"; manifest.close();
             if(!manifest) throw std::runtime_error("Cannot write session metadata");
@@ -156,7 +157,7 @@ struct Session {
             }
             if(!mounted) throw std::runtime_error("WinFsp mount failed. Check driver and available drive letters.");
             ptfs.Touch();
-            if(ptfs.readOnly) status=L"Read-only";
+            if(ptfs.readOnly) status=protectedArchive?L"Read-only · protected":L"Read-only";
         } catch(...) {
             if(mounted) host.Unmount();
             lease.reset();
@@ -223,6 +224,7 @@ struct Session {
         ptfs.closing=true;
     }
     void exportCopy(const fs::path& destination) {
+        if(protectedArchive) throw std::runtime_error("A protected archive cannot be exported without encryption");
         freeze();
         try {
             exportTree(root,destination,options);
@@ -239,7 +241,7 @@ struct Session {
             commitFrozen();
             if(eject) {host.Unmount();mounted=false;}
             else {ptfs.Touch();ptfs.closing=false;}
-            retryAfter=0;notifiedError.clear();status=ptfs.readOnly?L"Read-only":L"Saved";
+            retryAfter=0;notifiedError.clear();status=ptfs.readOnly?(protectedArchive?L"Read-only · protected":L"Read-only"):L"Saved";
         } catch(const std::exception& e) {status=wide(e.what());ptfs.closing=false;ptfs.Touch();throw;}
         catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
@@ -418,7 +420,7 @@ int wz_get(int i,WzVolume* out) {
         auto& s=*wz::sessions[i]; *out={};
         wz::copy(out->archive,32768,s.original.wstring());wz::copy(out->mount,16,s.drive);
         wz::copy(out->status,512,s.status);
-        out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->handles=s.ptfs.handles;out->options=s.options;
+        out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;out->handles=s.ptfs.handles;out->options=s.options;
         wz::copy(out->sessionId,64,s.cache.filename().wstring());
     });
 }

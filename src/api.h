@@ -14,7 +14,7 @@ typedef struct WzOptions {
 } WzOptions;
 typedef struct WzVolume {
     wchar_t archive[32768], mount[16], status[512];
-    int readOnly, dirty;
+    int readOnly, dirty, protectedArchive;
     unsigned handles;
     wchar_t sessionId[64];
     WzOptions options;

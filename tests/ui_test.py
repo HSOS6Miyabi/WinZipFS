@@ -15,6 +15,7 @@ import win32gui
 from zipfile import ZipFile, ZIP_STORED
 
 from pywinauto import Application, Desktop, mouse
+from pywinauto.keyboard import send_keys
 
 ROOT = Path.cwd()
 EXE = ROOT / "artifacts/app/WinZipFS.exe"
@@ -399,9 +400,7 @@ def test_settings():
     time.sleep(2)
     close_explorer()
     click("Recovery")
-    status_contains("Opened recovery cache")
-    time.sleep(2)
-    close_explorer()
+    status_contains("No abandoned archive sessions")
     click("LoadDefaults")
     status_contains("Default settings loaded")
     value("Delay", 3)
@@ -509,9 +508,71 @@ def test_safety():
     exit_application()
 
 
+def modal_button(label):
+    button = wait_for(lambda: next((item for item in window.descendants(control_type="Button")
+                                   if item.window_text() == label and item.is_visible()), None),
+                      f"Dialog button missing: {label}")
+    button.click_input()
+
+
+def test_password():
+    subprocess.run([str(EXE), str(FIX / "encrypted.7z")], timeout=30, check=True)
+    password = ctl("ArchivePassword", bring_into_view=True)
+    password.click_input()
+    send_keys("wrong-password", with_spaces=True)
+    modal_button("Mount read-only")
+    wait_for(lambda: window.child_window(auto_id="ArchivePassword", visible_only=False).exists(timeout=0.5),
+             "Password was not requested after failure")
+    password = ctl("ArchivePassword", bring_into_view=True)
+    password.click_input()
+    send_keys("TestFixturePassword", with_spaces=True)
+    modal_button("Mount read-only")
+    status_contains("Mounted")
+    root = Path(drive_from_details() + "\\")
+    assert (root / "sample.txt").read_text() == "original"
+    assert "Read-only" in ctl("Details").window_text()
+    assert not ctl("Flush").is_enabled()
+    assert not ctl("SaveCopy").is_enabled()
+    eject_selected()
+    exit_application()
+
+
+def test_recovery():
+    root = launch_archive(FIX / "ui.zip")
+    toggle("Batch")
+    click("Apply")
+    status_contains("Settings updated")
+    (root / "recovery-ui.txt").write_text("recovered UI data", encoding="utf-8")
+    wait_closed()
+    app.kill(soft=False)
+    app.wait_for_process_exit(timeout=30)
+    start_application()
+    status_contains("Recovered archive sessions")
+    click("Recovery")
+    ctl("RecoveryList")
+    modal_button("Save recovered copy…")
+    destination = FIX / "recovery-ui.zip"
+    complete_archive_dialog(destination, title="WinZipFS - Save archive copy")
+    status_contains("Recovered copy")
+    with ZipFile(destination) as archive:
+        assert archive.read("recovery-ui.txt") == b"recovered UI data"
+    click("Recovery")
+    ctl("RecoveryList")
+    modal_button("Delete recovery cache…")
+    dialog = Desktop(backend="win32").window(title="WinZipFS - Delete recovery cache", class_name="#32770")
+    dialog.wait("exists ready", timeout=20)
+    dialog.child_window(title="Yes", class_name="Button").click_input()
+    status_contains("Recovery cache removed")
+    click("Recovery")
+    status_contains("No abandoned archive sessions")
+    exit_application()
+
+
 SUITES = {
     "startup": test_startup,
     "safety": test_safety,
+    "password": test_password,
+    "recovery": test_recovery,
     "picker": test_picker,
     "shell": test_shell,
     "settings": test_settings,
