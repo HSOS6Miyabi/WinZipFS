@@ -17,6 +17,10 @@ try {
         & $seven a "-t$($entry[0])" (Join-Path $root "core.tar.$($entry[1])") (Join-Path $root 'core.tar') -y
         if ($LASTEXITCODE -ne 0) { throw "Compressed TAR fixture $($entry[0]) failed" }
     }
+    foreach ($entry in @(@('gzip','gz'),@('bzip2','bz2'),@('xz','xz'))) {
+        & $seven a "-t$($entry[0])" (Join-Path $root "sample.txt.$($entry[1])") (Join-Path $source 'sample.txt') -y
+        if ($LASTEXITCODE -ne 0) { throw "Single-stream fixture $($entry[0]) failed" }
+    }
     & $seven a -tzip (Join-Path $root 'encrypted.zip') '.\*' -pTestFixturePassword -mem=AES256 -y
     if ($LASTEXITCODE -ne 0) { throw 'Encrypted fixture failed' }
     & $seven a -tzip (Join-Path $root 'ui.zip') '.\*' -y
@@ -34,6 +38,18 @@ from pathlib import Path
 from zipfile import ZipFile
 import sys
 root = Path(sys.argv[1])
+
+def zstd_raw(data):
+    assert 0 < len(data) < 65792
+    if len(data) < 256:
+        frame = b"\x20" + bytes([len(data)])
+    else:
+        frame = b"\x60" + (len(data) - 256).to_bytes(2, "little")
+    block = ((len(data) << 3) | 1).to_bytes(3, "little")
+    return b"\x28\xb5\x2f\xfd" + frame + block + data
+
+(root / "sample.txt.zst").write_bytes(zstd_raw(b"original"))
+(root / "core.tar.zst").write_bytes(zstd_raw((root / "core.tar").read_bytes()))
 with ZipFile(root / "traversal.zip", "w") as z:
     z.writestr("../outside.txt", "must never be extracted")
 with ZipFile(root / "collision.zip", "w") as z:

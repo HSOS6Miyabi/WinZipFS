@@ -178,7 +178,10 @@ int wmain(int argc,wchar_t** argv) {
                 require(wz_mount((root/name).c_str(),&o,rejected,16)==0,"unsafe or encrypted archive rejected");
                 require(wz_count()==0,"rejected archive left no mounted volume");
             }
-            readonly(root/L"readonly.cab");
+            for(auto name:{L"readonly.cab",L"sample.txt.gz",L"sample.txt.bz2",L"sample.txt.xz",L"sample.txt.zst",L"core.tar.zst"}) {
+                std::wcout<<L"Testing read-only "<<name<<std::endl;
+                readonly(root/name);
+            }
             fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
             conflict(root/L"conflict.zip");idle(root/L"idle.zip");
         }

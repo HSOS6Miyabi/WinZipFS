@@ -145,17 +145,43 @@ public:
     ~TemporaryFile() {std::error_code ec;fs::remove(path_,ec);}
     const fs::path& path() const {return path_;}
 };
-inline void extractTar(const BitArchiveReader& outer,const fs::path& file) {
+inline void extractStreamItem(const BitArchiveReader& outer,const fs::path& file) {
     if(outer.itemsCount()!=1||outer.isItemFolder(0)||outer.hasEncryptedItems())
-        throw std::runtime_error("Invalid compressed TAR");
+        throw std::runtime_error("Invalid single-stream archive");
     if(outer.itemProperty(0,BitProperty::Size).isUInt64() &&
         outer.itemProperty(0,BitProperty::Size).getUInt64()>fs::space(file.parent_path()).available)
-        throw std::runtime_error("Insufficient temporary disk space for TAR");
+        throw std::runtime_error("Insufficient disk space for decompressed stream");
     std::ofstream output(file,std::ios::binary|std::ios::trunc);
-    if(!output) throw std::runtime_error("Cannot create temporary TAR");
+    if(!output) throw std::runtime_error("Cannot create decompressed file");
     output.exceptions(std::ios::badbit|std::ios::failbit);
     outer.extractTo(output,0);
     output.close();
+}
+inline bool singleStream(const BitInFormat& format) {
+    return format==BitFormat::GZip||format==BitFormat::BZip2||format==BitFormat::Xz||
+           format==BitFormat::Zstd||format==BitFormat::Z||format==BitFormat::Lzma||
+           format==BitFormat::Lzma86||format==BitFormat::Ppmd;
+}
+inline void extractStandalone(const BitArchiveReader& reader,const fs::path& source,const fs::path& root) {
+    if(reader.itemsCount()!=1||reader.isItemFolder(0))
+        throw std::runtime_error("Invalid single-stream archive");
+    auto item=reader.items().front();
+    if(item.isSymLink()||item.isEncrypted()) throw std::runtime_error("Unsupported single-stream entry");
+    auto name=item.rawPath();
+    if(name.empty()) name=source.stem().wstring();
+    name=safeName(name,false);
+    auto output=root/fs::path(name);
+    fs::create_directories(output.parent_path());
+    extractStreamItem(reader,output);
+    auto modified=reader.itemProperty(0,BitProperty::MTime);
+    if(modified.isFileTime()) {
+        HANDLE h=CreateFileW(output.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                             nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(h!=INVALID_HANDLE_VALUE) {
+            auto value=modified.getFileTime();
+            SetFileTime(h,nullptr,nullptr,&value);CloseHandle(h);
+        }
+    }
 }
 inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root) {
     Format fmt;
@@ -167,10 +193,13 @@ inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::p
         if(fmt.outer||zstdTar) {
             bool outerMetadata=outer.isMultiVolume()||present(outer.archiveProperty(BitProperty::Comment));
             TemporaryFile tar(root.parent_path()/L"extracted.tar");
-            extractTar(outer,tar.path());
+            extractStreamItem(outer,tar.path());
             BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
             if(validate(inner,root)||outerMetadata||zstdTar) fmt={};
             if(inner.itemsCount()) inner.extractTo(path8(root));
+        } else if(singleStream(outer.detectedFormat())&&outer.itemsCount()==1) {
+            fmt={};
+            extractStandalone(outer,source,root);
         } else {
             if(validate(outer,root) || outer.isMultiVolume() || present(outer.archiveProperty(BitProperty::Comment)))
                 fmt={};
@@ -216,7 +245,7 @@ inline void pack(const Bit7zLibrary& lib,const fs::path& root,const fs::path& ou
     reader.test();
     if(fmt.outer) {
         TemporaryFile tar(work.parent_path()/L"verified.tar");
-        extractTar(reader,tar.path());
+        extractStreamItem(reader,tar.path());
         BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
         inner.test();
     }
