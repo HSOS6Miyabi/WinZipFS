@@ -1,5 +1,6 @@
 """Exercise the actual WinUI window and Windows shell integration."""
 import ctypes
+import os
 import faulthandler
 import sys
 from ctypes import wintypes
@@ -18,7 +19,7 @@ from pywinauto import Application, Desktop, mouse
 from pywinauto.keyboard import send_keys
 
 ROOT = Path.cwd()
-EXE = ROOT / "artifacts/app/WinZipFS.exe"
+EXE = Path(os.environ.get("WZ_EXE", ROOT / "artifacts/app/WinZipFS.exe")).resolve()
 FIX = ROOT / "artifacts/fixtures"
 RESULTS = ROOT / "artifacts/test-results"
 RESULTS.mkdir(parents=True, exist_ok=True)

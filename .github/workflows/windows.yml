@@ -138,6 +138,7 @@ jobs:
           Copy-Item build/Release/7z.dll artifacts/app/
           Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
+          ./scripts/copy-crt.ps1 -Destination artifacts/app/
       - uses: actions/upload-artifact@v4
         with:
           name: winui-build-x64
@@ -175,8 +176,35 @@ jobs:
           name: winui-test-results-${{ matrix.suite }}
           path: artifacts/test-results/
           if-no-files-found: warn
+  install-integration:
+    needs: build-ui
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: winui-build-x64
+          path: artifacts/app/
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./scripts/build-installer.ps1
+      - name: Test installation, mounted archive and uninstallation
+        shell: pwsh
+        run: ./tests/install.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-test-results
+          path: artifacts/test-results/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-installer-x64
+          path: artifacts/installer/WinZipFS-Setup-x64.exe
+          if-no-files-found: error
   package:
-    needs: [native-integration, winui-integration]
+    needs: [native-integration, winui-integration, install-integration]
     runs-on: windows-2022
     steps:
       - uses: actions/download-artifact@v4
@@ -187,4 +215,13 @@ jobs:
         with:
           name: WinZipFS-windows-x64
           path: artifacts/app/
+          if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-installer-x64
+          path: artifacts/installer/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinZipFS-Setup-x64
+          path: artifacts/installer/WinZipFS-Setup-x64.exe
           if-no-files-found: error

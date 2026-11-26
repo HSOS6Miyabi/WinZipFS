@@ -2,6 +2,12 @@
 
 WinZipFS mounts archives as Windows drives using WinFsp, with a native C++20 core, the 7-Zip engine through bit7z, and a WinUI 3 desktop interface.
 
+## Install
+
+Download the Windows x64 installer or portable package from the latest successful [Windows build](https://github.com/HSOS6Miyabi/WinZipFS/actions/workflows/windows.yml). The installer adds a Start menu shortcut, registers archive types and installs WinFsp if required. Windows may request administrator approval for the driver. To enable double-click mounting for an existing association, choose WinZipFS in Windows Default apps.
+
+For the portable package, extract all files to a permanent folder and install [WinFsp](https://winfsp.dev/rel/) 2.2 or later. Open WinZipFS and select Register file types. Before upgrading or uninstalling, exit WinZipFS from the notification area so that pending modifications are saved. Uninstalling preserves recovery files and the shared WinFsp driver.
+
 ## Features
 
 - Mount several archives simultaneously, including in an explicitly selected read-only mode; open the drive in File Explorer.
