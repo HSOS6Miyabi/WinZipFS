@@ -136,6 +136,27 @@ inline bool isWritable(const fs::path& path) {
     if(h==INVALID_HANDLE_VALUE) return false;
     CloseHandle(h); return true;
 }
+class TemporaryFile {
+    fs::path path_;
+public:
+    explicit TemporaryFile(fs::path path):path_(std::move(path)) {}
+    TemporaryFile(const TemporaryFile&)=delete;
+    TemporaryFile& operator=(const TemporaryFile&)=delete;
+    ~TemporaryFile() {std::error_code ec;fs::remove(path_,ec);}
+    const fs::path& path() const {return path_;}
+};
+inline void extractTar(const BitArchiveReader& outer,const fs::path& file) {
+    if(outer.itemsCount()!=1||outer.isItemFolder(0)||outer.hasEncryptedItems())
+        throw std::runtime_error("Invalid compressed TAR");
+    if(outer.itemProperty(0,BitProperty::Size).isUInt64() &&
+        outer.itemProperty(0,BitProperty::Size).getUInt64()>fs::space(file.parent_path()).available)
+        throw std::runtime_error("Insufficient temporary disk space for TAR");
+    std::ofstream output(file,std::ios::binary|std::ios::trunc);
+    if(!output) throw std::runtime_error("Cannot create temporary TAR");
+    output.exceptions(std::ios::badbit|std::ios::failbit);
+    outer.extractTo(output,0);
+    output.close();
+}
 inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root) {
     Format fmt;
     {
@@ -144,9 +165,10 @@ inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::p
         auto name=lower(source.filename().wstring());
         bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
         if(fmt.outer||zstdTar) {
-            if(outer.itemsCount()!=1 || outer.isItemFolder(0)) throw std::runtime_error("Invalid compressed TAR");
-            bool outerMetadata=validate(outer,root)||outer.isMultiVolume();
-            BitArchiveReader inner(lib,outer,0,BitFormat::Tar);
+            bool outerMetadata=outer.isMultiVolume()||present(outer.archiveProperty(BitProperty::Comment));
+            TemporaryFile tar(root.parent_path()/L"extracted.tar");
+            extractTar(outer,tar.path());
+            BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
             if(validate(inner,root)||outerMetadata||zstdTar) fmt={};
             if(inner.itemsCount()) inner.extractTo(path8(root));
         } else {
@@ -192,6 +214,11 @@ inline void pack(const Bit7zLibrary& lib,const fs::path& root,const fs::path& ou
     }
     BitArchiveReader reader(lib,path8(output),fmt.outer?static_cast<const BitInFormat&>(*fmt.outer):*fmt.inner);
     reader.test();
-    if(fmt.outer) { BitArchiveReader inner(lib,reader,0,BitFormat::Tar); inner.test(); }
+    if(fmt.outer) {
+        TemporaryFile tar(work.parent_path()/L"verified.tar");
+        extractTar(reader,tar.path());
+        BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
+        inner.test();
+    }
 }
 }

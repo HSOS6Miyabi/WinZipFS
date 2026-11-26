@@ -54,8 +54,9 @@ jobs:
         if: ${{ !cancelled() && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: |
+          New-Item artifacts/test-results -ItemType Directory -Force | Out-Null
           ./tests/fixtures.ps1
-          & build/Release/core-tests.exe (Resolve-Path artifacts/fixtures)
+          & build/Release/core-tests.exe (Resolve-Path artifacts/fixtures) 2>&1 | Tee-Object artifacts/test-results/core-integration.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build WinUI 3
         id: ui-build
@@ -70,7 +71,7 @@ jobs:
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
           Get-ChildItem build/vcpkg_installed/x64-windows/share/bit7z/copyright | Copy-Item -Destination artifacts/app/bit7z-License.txt
       - name: WinUI and notification area automation
-        if: ${{ !cancelled() && steps.ui-build.outcome == 'success' && steps.integration.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ui-build.outcome == 'success' && steps.core-build.outcome == 'success' }}
         shell: pwsh
         run: |
           python -m pip install pywinauto==0.6.9
