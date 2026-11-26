@@ -97,8 +97,11 @@ inline bool forward(const std::vector<std::wstring>& args) {
     }
     return true;
 }
-inline void open(std::wstring const& path) {
-    ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+inline bool open(std::wstring const& path) {
+    HRESULT apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+    auto result=ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+    if(SUCCEEDED(apartment)) CoUninitialize();
+    return reinterpret_cast<INT_PTR>(result)>32;
 }
 inline std::wstring pick(HWND owner) {
     winrt::com_ptr<IFileOpenDialog> dialog;

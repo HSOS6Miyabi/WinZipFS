@@ -1,5 +1,7 @@
 """Exercise the actual WinUI window and Windows shell integration."""
 import ctypes
+from ctypes import wintypes
+import struct
 from pathlib import Path
 import re
 import subprocess
@@ -17,6 +19,7 @@ RESULTS = ROOT / "artifacts/test-results"
 RESULTS.mkdir(parents=True, exist_ok=True)
 desktop = Desktop(backend="uia")
 user32 = ctypes.windll.user32
+user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = ctypes.c_void_p
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
 
@@ -34,9 +37,8 @@ def wait_for(predicate, message, timeout=60):
     raise AssertionError(f"{message}; {last}")
 
 
-app = Application(backend="uia").start(f'"{EXE}" --no-explorer')
-window = app.window(title="WinZipFS")
-window.wait("exists ready", timeout=90)
+app = None
+window = None
 
 
 def ctl(identifier):
@@ -44,11 +46,13 @@ def ctl(identifier):
 
 
 def click(identifier):
+    print(f"Click {identifier}", flush=True)
     ctl(identifier).invoke()
 
 
 def value(identifier, text):
     ctl(identifier).set_edit_text(str(text))
+    assert ctl(identifier).iface_value.CurrentValue == str(text), identifier
 
 
 def combo(identifier, index):
@@ -77,19 +81,22 @@ def drive_from_details():
 
 
 def choose_archive(path):
-    click("Mount")
+    ctl("Mount").click_input()
     dialog = desktop.window(title="Open", control_type="Window")
     dialog.wait("exists ready", timeout=30)
-    dialog.child_window(auto_id="1148", control_type="Edit").set_edit_text(str(path))
-    dialog.child_window(title="Open", control_type="Button").invoke()
+    field = dialog.child_window(auto_id="1148", control_type="Edit")
+    field.wait("exists ready", timeout=20)
+    field.set_edit_text(str(path))
+    dialog.child_window(title="Open", control_type="Button").click_input()
 
 
 def tray_menu(keys):
     control = user32.FindWindowW("WinZipFS.Control", None)
     assert control, "Notification area callback window missing"
     user32.PostMessageW(control, 0x8001, 1, 0x0205)
-    time.sleep(1)
+    wait_for(lambda: user32.FindWindowW("#32768", None), "Notification menu did not open")
     send_keys(keys, pause=0.2)
+    wait_for(lambda: not user32.FindWindowW("#32768", None), "Notification menu did not close")
 
 
 def close_explorer():
@@ -98,7 +105,71 @@ def close_explorer():
     subprocess.run(["powershell", "-NoProfile", "-Command", command], check=True)
 
 
+
+class NotifyIconIdentifier(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT), ("guidItem", ctypes.c_byte * 16)]
+
+
+class ShellExecuteInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
+        ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR),
+        ("lpParameters", wintypes.LPCWSTR), ("lpDirectory", wintypes.LPCWSTR),
+        ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE), ("lpIDList", ctypes.c_void_p),
+        ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY), ("dwHotKey", wintypes.DWORD),
+        ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+
+
+def verify_tray_icon():
+    hwnd = wait_for(lambda: user32.FindWindowW("WinZipFS.Control", None), "Tray owner missing")
+    info = NotifyIconIdentifier()
+    info.cbSize = ctypes.sizeof(info)
+    info.hWnd = hwnd
+    info.uID = 1
+    rect = wintypes.RECT()
+    get_rect = ctypes.windll.shell32.Shell_NotifyIconGetRect
+    get_rect.argtypes = [ctypes.POINTER(NotifyIconIdentifier), ctypes.POINTER(wintypes.RECT)]
+    get_rect.restype = ctypes.c_long
+    wait_for(lambda: get_rect(ctypes.byref(info), ctypes.byref(rect)) == 0,
+             "Notification icon not registered with Explorer")
+
+
+def open_associated(path):
+    info = ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x00000001 | 0x00000100  # SEE_MASK_CLASSNAME | SEE_MASK_NOASYNC
+    info.lpVerb = "open"
+    info.lpFile = str(path)
+    info.lpClass = "WinZipFS.Archive"
+    info.nShow = 1
+    execute = ctypes.windll.shell32.ShellExecuteExW
+    execute.argtypes = [ctypes.POINTER(ShellExecuteInfo)]
+    execute.restype = wintypes.BOOL
+    assert execute(ctypes.byref(info)), "Registered open command failed"
+
+
+def select_volume(name):
+    item = wait_for(lambda: next((v for v in ctl("Volumes").descendants(control_type="ListItem")
+                                  if name in v.window_text()), None), f"Missing volume {name}")
+    item.select()
+    wait_for(lambda: name in ctl("Details").window_text(), f"Selection failed for {name}")
+
+
+def current_options():
+    return (ctl("Batch").iface_toggle.CurrentToggleState,
+            int(ctl("Delay").iface_value.CurrentValue),
+            int(ctl("Idle").iface_value.CurrentValue),
+            ctl("Level").selected_index(), ctl("Method").selected_index(),
+            int(ctl("Threads").iface_value.CurrentValue),
+            ctl("Solid").iface_toggle.CurrentToggleState)
+
+
 try:
+    app = Application(backend="uia").start(f'"{EXE}" --no-explorer')
+    window = app.window(title="WinZipFS")
+    window.wait("exists ready", timeout=90)
+    verify_tray_icon()
     for name in ("Mount", "Hide", "Exit", "Progress", "Status", "Summary", "Volumes", "Details",
                  "Open", "Flush", "Eject", "Batch", "Delay", "Idle", "Level", "Method", "Threads",
                  "Solid", "Apply", "LoadDefaults", "SaveDefaults", "Register", "Unregister",
@@ -110,15 +181,7 @@ try:
         assert winreg.QueryValueEx(key, ".zip")[0] == "WinZipFS.Archive"
         assert winreg.QueryValueEx(key, ".rar")[0] == "WinZipFS.Archive"
     click("DefaultApps")
-    time.sleep(2)
-    click("Unregister")
-    status_contains("removed")
-    try:
-        winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\WinZipFS.Archive")
-    except FileNotFoundError:
-        pass
-    else:
-        raise AssertionError("ProgID was not removed")
+    wait_for(lambda: "Windows default apps" in status(), "Default apps command did not report a result")
     choose_archive(FIX / "ui.zip")
     status_contains("Mounted")
     drive = drive_from_details()
@@ -133,14 +196,41 @@ try:
     toggle("Solid")
     click("Apply")
     status_contains("Settings updated")
+    assert current_options() == (1, 8, 2, 4, 2, 2, 0)
+    value("Delay", 0)
+    click("Apply")
+    status_contains("Error:")
+    value("Delay", 8)
+    open_associated(FIX / "readonly.cab")
+    status_contains("Mounted")
+    select_volume("readonly.cab")
+    readonly_drive = drive_from_details()
+    assert "Read-only" in ctl("Details").window_text()
+    assert not ctl("Flush").is_enabled()
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    assert not Path(readonly_drive + "\\").exists()
+    select_volume("ui.zip")
+    assert current_options() == (1, 8, 2, 4, 2, 2, 0)
+    click("Unregister")
+    status_contains("removed")
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\WinZipFS.Archive")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("ProgID was not removed")
     (root / "ui.txt").write_text("WinUI writeback", encoding="utf-8")
     wait_closed()
     click("Flush")
     status_contains("Saved")
     click("Open")
+    status_contains("Opened ")
     time.sleep(2)
     close_explorer()
     click("Recovery")
+    status_contains("Opened recovery cache")
     time.sleep(2)
     close_explorer()
     click("LoadDefaults")
@@ -153,7 +243,7 @@ try:
     click("SaveDefaults")
     status_contains("Defaults saved")
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\WinZipFS") as key:
-        assert len(winreg.QueryValueEx(key, "Options")[0]) == 28
+        assert struct.unpack("<7i", winreg.QueryValueEx(key, "Options")[0]) == (0, 3, 0, 1, 0, 1, 1)
     click("Hide")
     wait_for(lambda: not window.is_visible(), "Hide failed")
     subprocess.run([str(EXE)], timeout=30, check=True)
@@ -184,10 +274,11 @@ try:
 except Exception:
     (RESULTS / "ui.txt").write_text(traceback.format_exc())
     try:
-        window.capture_as_image().save(RESULTS / "ui-failure.png")
+        if window is not None:
+            window.capture_as_image().save(RESULTS / "ui-failure.png")
     except Exception:
         pass
     raise
 finally:
-    if app.is_process_running():
+    if app is not None and app.is_process_running():
         app.kill()

@@ -61,7 +61,7 @@ class Dashboard {
     WzOptions defaults=shell::loadDefaults();
     std::vector<WzVolume> rows;
     std::wstring selected;
-    bool rebuilding=false,busy=false,quitting=false,noExplorer=false;
+    bool rebuilding=false,busy=false,quitting=false,noExplorer=false,trayReady=false;
     struct Job {std::function<std::wstring()> action;bool quiet=false,exit=false;};
     std::deque<Job> jobs;
     static constexpr UINT trayMessage=WM_APP+1;
@@ -178,8 +178,9 @@ class Dashboard {
         queue([path=std::move(path),opt,explorer] {
             wchar_t drive[16]{};
             if(!wz_mount(path.c_str(),&opt,drive,16)) return L"Error: "+coreError();
-            if(explorer) shell::open(std::wstring(drive)+L"\\");
-            return L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
+            std::wstring result=L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
+            if(explorer&&!shell::open(std::wstring(drive)+L"\\")) result+=L" (Explorer could not be opened)";
+            return result;
         });
     }
     void browse() {
@@ -217,7 +218,14 @@ class Dashboard {
     void show() {
         ShowWindow(hwnd,SW_RESTORE);window.Activate();SetForegroundWindow(hwnd);
     }
-    void hide() {ShowWindow(hwnd,SW_HIDE);}
+    void hide() {
+        if(!trayReady) {say(L"Error: Notification area is unavailable. Keep this window open.");return;}
+        ShowWindow(hwnd,SW_HIDE);
+    }
+    void openDrive(std::wstring drive) {
+        if(drive.empty()) return;
+        say(shell::open(drive+L"\\")?L"Opened "+drive:L"Error: Cannot open drive "+drive);
+    }
     void trayMenu() {
         HMENU root=CreatePopupMenu();
         std::vector<std::function<void()>> commands;
@@ -232,7 +240,7 @@ class Dashboard {
             auto drive=std::wstring(r.mount);
             auto opt=r.options;bool readOnly=r.readOnly!=0;
             HMENU sub=CreatePopupMenu();
-            add(sub,L"Open drive",[drive]{shell::open(drive+L"\\");});
+            add(sub,L"Open drive",[this,drive]{openDrive(drive);});
             add(sub,L"Compression and cache settings",[this,drive]{selectDrive(drive);});
             add(sub,L"Batch write mode",[this,drive,opt]() mutable {
                 opt.batch=!opt.batch;
@@ -257,8 +265,9 @@ class Dashboard {
         bool custom=SUCCEEDED(SHGetStockIconInfo(SIID_ZIPFILE,SHGSI_ICON|SHGSI_SMALLICON,&icon));
         tray.hIcon=custom?icon.hIcon:LoadIconW(nullptr,IDI_APPLICATION);
         wcscpy_s(tray.szTip,L"WinZipFS · Archive drives");
-        Shell_NotifyIconW(NIM_ADD,&tray);
+        trayReady=Shell_NotifyIconW(NIM_ADD,&tray)!=FALSE;
         if(custom) DestroyIcon(icon.hIcon);
+        if(!trayReady) {ShowWindow(hwnd,SW_SHOW);say(L"Notification area is unavailable; the main window remains open.");}
     }
     static LRESULT CALLBACK windowProc(HWND h,UINT msg,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR p) {
         auto self=reinterpret_cast<Dashboard*>(p);
@@ -304,7 +313,8 @@ class Dashboard {
         toolbar.Children().Append(mountBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
         page.Children().Append(toolbar);
         auto activity=horizontal();
-        progress=identify(ProgressRing{},L"Progress");progress.Width(20);progress.Height(20);
+        progress=identify(ProgressRing{},L"Progress");progress.Width(20);progress.Height(20);progress.IsActive(false);
+        AutomationProperties::SetName(progress,L"Archive operation progress");
         message=identify(text(L"Ready"),L"Status");
         activity.Children().Append(progress);activity.Children().Append(message);page.Children().Append(activity);
         auto volumes=vertical();
@@ -356,7 +366,7 @@ class Dashboard {
             if(rebuilding)return;int i=list.SelectedIndex();selected=i>=0&&i<int(rows.size())?rows[i].mount:L"";
             load(current()?current()->options:defaults);updateDetails();
         });
-        openBtn.Click([this](auto&&,auto&&){if(!selected.empty())shell::open(selected+L"\\");});
+        openBtn.Click([this](auto&&,auto&&){openDrive(selected);});
         flushBtn.Click([this](auto&&,auto&&){save(selected,false);});
         ejectBtn.Click([this](auto&&,auto&&){save(selected,true);});
         applyBtn.Click([this](auto&&,auto&&){apply();});
@@ -364,13 +374,13 @@ class Dashboard {
         saveDefaultsBtn.Click([this](auto&&,auto&&){saveDefaults();});
         registerBtn.Click([this](auto&&,auto&&){try{shell::registerAssociations();say(L"Archive file types registered.");}catch(...){say(L"Error: Cannot register file types.");}});
         unregisterBtn.Click([this](auto&&,auto&&){shell::unregisterAssociations();say(L"Archive file type registration removed.");});
-        systemDefaultsBtn.Click([](auto&&,auto&&){shell::open(L"ms-settings:defaultapps");});
+        systemDefaultsBtn.Click([this](auto&&,auto&&){say(shell::open(L"ms-settings:defaultapps")?L"Opened Windows default apps.":L"Error: Windows default apps settings unavailable.");});
         recoveryBtn.Click([this](auto&&,auto&&){
             PWSTR p=nullptr;if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&p))) {
                 std::filesystem::path path(p);CoTaskMemFree(p);path/=L"WinZipFS";path/=L"cache";
                 std::error_code ec;std::filesystem::create_directories(path,ec);
-                if(!ec)shell::open(path.wstring());else say(L"Error: Cannot open recovery cache.");
-            }
+                if(!ec&&shell::open(path.wstring())) say(L"Opened recovery cache.");else say(L"Error: Cannot open recovery cache.");
+            } else say(L"Error: Cannot locate recovery cache.");
         });
         load(defaults);updateDetails();
     }
@@ -395,7 +405,7 @@ public:
         }
         window.Activate();if(background)hide();
         timer.Interval(std::chrono::seconds(2));
-        timer.Tick([this](auto&&,auto&&){if(!busy&&jobs.empty()&&!quitting)queue([]{wz_tick();return std::wstring{};},true);});
+        timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{wz_tick();return std::wstring{};},true);});
         timer.Start();
         for(auto const& arg:args) {
             if(arg==L"--register") {try{shell::registerAssociations();}catch(...){say(L"Error: Cannot register archive types.");}}
