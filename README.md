@@ -15,7 +15,7 @@ WinZipFS mounts archives as Windows drives using WinFsp, with a native C++20 cor
 
 | Read/write | Read-only |
 | --- | --- |
-| ZIP, ZIPX, 7z, TAR, TAR.GZ/TGZ, TAR.BZ2/TBZ/TBZ2, TAR.XZ/TXZ | RAR, CAB, ARJ, LZH/LHA, CPIO, DEB, RPM, ISO, WIM, DMG, XAR, standalone GZIP/BZIP2/XZ/ZSTD and other 7-Zip-readable formats |
+| ZIP, ZIPX, 7z, TAR, TAR.GZ/TGZ, TAR.BZ2/TBZ/TBZ2, TAR.XZ/TXZ | TAR.ZST/TZST, RAR, CAB, ARJ, LZH/LHA, CPIO, DEB, RPM, ISO, WIM, DMG, XAR, standalone GZIP/BZIP2/XZ/ZSTD and other 7-Zip-readable formats |
 
 Formats are detected by the archive engine. Multi-volume archives, archives with metadata that cannot be safely rewritten, and files without write access are read-only. Archives with encrypted contents, unsafe Windows names, conflicting paths, symbolic links or special entries are rejected. Standalone single-stream formats and disk images cannot be edited as general multi-file archives.
 
@@ -23,7 +23,7 @@ Formats are detected by the archive engine. Multi-volume archives, archives with
 
 Files are extracted into a private per-session directory under `%LOCALAPPDATA%\WinZipFS\cache`. Changes are committed only when WinFsp reports that no file handles remain open. In automatic mode, writeback starts after the configured delay; batch mode defers it until explicit Save changes or Eject. Idle eject is disabled by default. Idle eject saves pending changes, including in batch mode.
 
-A replacement archive is generated beside the original, tested using the 7-Zip engine, flushed to storage and then used to replace the original. An external change to the original file causes writeback to stop and retain the cache. During archive generation, opening new handles on the drive temporarily fails. If save fails, the session stays mounted and cached files are retained. On unexpected process termination, use Open recovery cache to inspect session directories and their archive.txt manifests.
+A replacement archive is generated beside the original, tested using the 7-Zip engine, flushed to storage and then used to replace the original. An external change to the original file causes writeback to stop and retain the cache. During archive generation, opening new handles on the drive temporarily fails. If save fails, the session stays mounted and cached files are retained. The replacement operation creates a backup of the original; if replacement fails, remaining backup and replacement files are retained for recovery. On unexpected process termination, use Open recovery cache to inspect session directories and their archive.txt manifests.
 
 ## Build
 

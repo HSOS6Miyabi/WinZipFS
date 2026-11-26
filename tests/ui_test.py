@@ -67,6 +67,10 @@ def status_contains(s):
     return wait_for(lambda: s in status(), f"Status did not contain {s!r}")
 
 
+def wait_closed():
+    wait_for(lambda: "Open handles: 0" in ctl("Details").window_text(), "Open file handles remain")
+
+
 def drive_from_details():
     return wait_for(lambda: re.search(r"\b([D-Z]:)\s+·", ctl("Details").window_text()),
                     "Mounted drive missing").group(1)
@@ -130,6 +134,7 @@ try:
     click("Apply")
     status_contains("Settings updated")
     (root / "ui.txt").write_text("WinUI writeback", encoding="utf-8")
+    wait_closed()
     click("Flush")
     status_contains("Saved")
     click("Open")
@@ -153,6 +158,7 @@ try:
     wait_for(lambda: not window.is_visible(), "Hide failed")
     subprocess.run([str(EXE)], timeout=30, check=True)
     wait_for(window.is_visible, "Single instance show failed")
+    wait_closed()
     click("Eject")
     status_contains("Ejected")
     wait_for(lambda: not root.exists(), "Ejected drive still exists")
@@ -166,6 +172,7 @@ try:
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{ENTER}")
     status_contains("Batch mode updated")
     (tray_root / "tray.txt").write_text("tray writeback", encoding="utf-8")
+    wait_closed()
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{ENTER}")
     status_contains("Saved")
     tray_menu("{HOME}{DOWN}{DOWN}{RIGHT}{DOWN}{DOWN}{DOWN}{DOWN}{ENTER}")

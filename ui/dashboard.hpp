@@ -118,7 +118,9 @@ class Dashboard {
         for(int i=0;i<n;++i) {WzVolume v{};if(wz_get(i,&v)) updated.push_back(v);}
         bool changed=rows.size()!=updated.size();
         if(!changed) for(size_t i=0;i<rows.size();++i) if(rowText(rows[i])!=rowText(updated[i])) {changed=true;break;}
-        auto previous=selected;rows=std::move(updated);
+        auto previous=selected;
+        auto prior=current()?current()->options:defaults;
+        rows=std::move(updated);
         if(changed) {
             rebuilding=true;
             list.Items().Clear();
@@ -130,8 +132,11 @@ class Dashboard {
             if(index<0&&!rows.empty()) index=0;
             list.SelectedIndex(index);selected=index<0?L"":rows[index].mount;
             rebuilding=false;
-            if(previous!=selected) load(current()?current()->options:defaults);
         }
+        auto next=current()?current()->options:defaults;
+        if(previous!=selected||prior.batch!=next.batch||prior.delaySeconds!=next.delaySeconds||
+           prior.idleMinutes!=next.idleMinutes||prior.level!=next.level||prior.method!=next.method||
+           prior.threads!=next.threads||prior.solid!=next.solid) load(next);
         summary.Text(hs(std::to_wstring(rows.size())+L" mounted  ·  "+
             std::to_wstring(std::count_if(rows.begin(),rows.end(),[](const auto& r){return r.dirty!=0;}))+L" pending writeback"));
         updateDetails();
@@ -152,6 +157,7 @@ class Dashboard {
         co_await ui;
         busy=false;progress.IsActive(false);
         if(!job.quiet||failed) say(result);
+        if(failed&&!IsWindowVisible(hwnd)) show();
         if(job.exit&&!failed) {
             quitting=true;timer.Stop();
             Shell_NotifyIconW(NIM_DELETE,&tray);

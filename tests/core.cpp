@@ -46,6 +46,7 @@ void waitClosed(std::wstring const& drive) {
 }
 void eject(std::wstring const& drive) {
     waitClosed(drive);require(wz_eject(drive.c_str())==1,"eject");
+    for(int i=0;i<100 && (GetLogicalDrives()&(1u<<(drive[0]-L'A')));++i) std::this_thread::sleep_for(50ms);
     require((GetLogicalDrives()&(1u<<(drive[0]-L'A')))==0,"drive still mounted");
 }
 void roundtrip(fs::path const& archive) {
@@ -98,6 +99,36 @@ void readonly(fs::path const& archive) {
     require(read(fs::path(root)/L"sample.txt")=="original","read-only data");
     eject(drive);
 }
+void conflict(fs::path const& archive) {
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto original=read(archive);
+    FILETIME modified{};
+    HANDLE h=CreateFileW(archive.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                        nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"open original attributes");
+    BOOL ok=GetFileTime(h,nullptr,nullptr,&modified);CloseHandle(h);
+    require(ok!=0,"original timestamp");
+    auto drive=mount(archive,o);
+    auto path=fs::path(drive+L"\\")/L"conflict.txt";
+    write(path,"cached modification");waitClosed(drive);
+    auto external=original+"external modification";
+    write(archive,external);
+    require(wz_flush(drive.c_str())==0,"external modification rejected");
+    require(read(archive)==external,"external archive preserved");
+    require(volume(drive).dirty&&read(path)=="cached modification","cached edits retained");
+    waitClosed(drive);
+    write(archive,original);
+    h=CreateFileW(archive.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                  nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"restore original attributes");
+    ok=SetFileTime(h,nullptr,nullptr,&modified);CloseHandle(h);
+    require(ok!=0,"restore original timestamp");
+    require(wz_flush(drive.c_str())==1,"recover after external conflict");
+    eject(drive);
+    drive=mount(archive,o);
+    require(read(fs::path(drive+L"\\")/L"conflict.txt")=="cached modification","recovered edits persisted");
+    eject(drive);
+}
 void idle(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);o.idleMinutes=1;o.delaySeconds=1;
     auto drive=mount(archive,o);write(fs::path(drive+L"\\")/L"auto.txt","auto");
@@ -119,7 +150,9 @@ int wmain(int argc,wchar_t** argv) {
         if(argc==2) {
             fs::path root=argv[1];
             for(auto ext:{L".zip",L".7z",L".tar",L".tar.gz"})roundtrip(root/(std::wstring(L"core")+ext));
-            readonly(root/L"readonly.cab");idle(root/L"idle.zip");
+            readonly(root/L"readonly.cab");
+            fs::copy_file(root/L"ui.zip",root/L"conflict.zip",fs::copy_options::overwrite_existing);
+            conflict(root/L"conflict.zip");idle(root/L"idle.zip");
         }
         require(wz_shutdown()==1,"shutdown");
         std::cout<<"Native tests passed\n";return 0;

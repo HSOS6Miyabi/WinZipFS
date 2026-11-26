@@ -106,7 +106,9 @@ struct Session {
         if(ptfs.readOnly) throw std::runtime_error("Read-only archive");
         if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed; cache retained for recovery");
         auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp");
+        auto backup=original.parent_path()/(L".winzipfs-"+guid()+L".bak");
         auto work=cache/L"repack.tar";
+        bool replacing=false;
         try {
             std::error_code ec;fs::remove(work,ec);
             pack(lib(),root,tmp,work,format,options);
@@ -115,14 +117,23 @@ struct Session {
             BOOL flushed=FlushFileBuffers(out);CloseHandle(out);
             if(!flushed) throw std::runtime_error("Cannot flush new archive");
             if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed during compression");
-            if(!ReplaceFileW(original.c_str(),tmp.c_str(),nullptr,0,nullptr,nullptr))
-                throw std::runtime_error("Cannot replace original archive; cache retained");
+            replacing=true;
+            if(!ReplaceFileW(original.c_str(),tmp.c_str(),backup.c_str(),0,nullptr,nullptr)) {
+                DWORD code=GetLastError();
+                if(GetFileAttributesW(original.c_str())==INVALID_FILE_ATTRIBUTES &&
+                   GetFileAttributesW(backup.c_str())!=INVALID_FILE_ATTRIBUTES)
+                    MoveFileExW(backup.c_str(),original.c_str(),MOVEFILE_WRITE_THROUGH);
+                throw std::runtime_error("Cannot replace original archive (Windows error "+std::to_string(code)+"); cache retained; replacement: "+path8(tmp)+"; backup: "+path8(backup));
+            }
             fingerprint=Fingerprint(original);
             ptfs.dirty=false;
+            fs::remove(backup,ec);
             fs::remove(work,ec);
             status=L"Saved";
         } catch(...) {
-            std::error_code ec;fs::remove(tmp,ec);fs::remove(work,ec);throw;
+            std::error_code ec;
+            if(!replacing) fs::remove(tmp,ec);
+            fs::remove(work,ec);throw;
         }
     }
     bool idle(unsigned long long now,unsigned long long delay) const {
