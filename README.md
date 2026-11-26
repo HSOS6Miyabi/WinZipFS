@@ -8,6 +8,18 @@ Download the Windows x64 installer or portable package from the latest successfu
 
 For the portable package, extract all files to a permanent folder and install [WinFsp](https://winfsp.dev/rel/) 2.2 or later. Open WinZipFS and select Register file types. Before upgrading or uninstalling, exit WinZipFS from the notification area so that pending modifications are saved. Uninstalling preserves recovery files and the shared WinFsp driver.
 
+## UNC access without drive letters
+
+WinZipFS registers a local WinFsp network namespace while the application is running. The **UNC access without drive letters** panel displays the current Windows user's namespace. A local archive such as `D:\Documents\example.zip` is addressed as:
+
+```text
+\\WinZipFS\Archives-<Windows user SID>-<session ID>\D\Documents\example.zip\folder\file.txt
+```
+
+Use **Copy UNC path** to obtain the exact address without extracting or mounting the archive. Opening that address directly from Explorer, PowerShell, or another application lazily creates the archive cache. No drive letter is assigned. After the last handle closes, the configured idle cache lifetime (30 seconds by default, 0–86400 seconds) determines when changes are saved and the cache is released. Opening the same address again creates a fresh session. Batch write mode also saves pending changes before expiry. A failed save retains the cache for recovery.
+
+The namespace is local to the Windows session and checks the caller's user identity and integrity level; it does not provide an SMB share or expose ordinary local files. Source archives must be on local physical drives without reparse-point path components. A session cannot simultaneously be mounted through a drive letter and through UNC, which prevents competing modifications. For encrypted archives, use **Open UNC archive** to enter the password in the application. You can choose UNC as the default for double-click opening or use `WinZipFS.exe --unc "D:\Documents\example.zip"`. Direct UNC access requires the WinZipFS process to be running.
+
 ## Features
 
 - Mount several archives simultaneously, including in an explicitly selected read-only mode; open the drive in File Explorer.

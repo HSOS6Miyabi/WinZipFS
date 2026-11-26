@@ -77,6 +77,38 @@ inline void saveDefaults(WzOptions o) {
     auto r=RegSetValueExW(h,L"Options",0,REG_BINARY,reinterpret_cast<const BYTE*>(&o),sizeof(o));RegCloseKey(h);
     if(r!=ERROR_SUCCESS) throw std::runtime_error("Cannot save settings");
 }
+struct UncSettings {unsigned seconds=30;bool prefer=false;};
+inline UncSettings loadUncSettings() {
+    UncSettings value;
+    DWORD data=0,size=sizeof(data);
+    if(RegGetValueW(HKEY_CURRENT_USER,registry,L"UncCacheSeconds",RRF_RT_REG_DWORD,nullptr,&data,&size)==ERROR_SUCCESS&&data<=86400)
+        value.seconds=data;
+    size=sizeof(data);
+    if(RegGetValueW(HKEY_CURRENT_USER,registry,L"PreferUnc",RRF_RT_REG_DWORD,nullptr,&data,&size)==ERROR_SUCCESS)
+        value.prefer=data!=0;
+    return value;
+}
+inline void saveUncSettings(UncSettings value) {
+    HKEY h{};
+    if(RegCreateKeyExW(HKEY_CURRENT_USER,registry,0,nullptr,0,KEY_SET_VALUE,nullptr,&h,nullptr)!=ERROR_SUCCESS)
+        throw std::runtime_error("Cannot save UNC settings");
+    DWORD seconds=value.seconds,prefer=value.prefer;
+    auto r=RegSetValueExW(h,L"UncCacheSeconds",0,REG_DWORD,reinterpret_cast<BYTE*>(&seconds),sizeof(seconds));
+    auto r2=RegSetValueExW(h,L"PreferUnc",0,REG_DWORD,reinterpret_cast<BYTE*>(&prefer),sizeof(prefer));
+    RegCloseKey(h);
+    if(r!=ERROR_SUCCESS||r2!=ERROR_SUCCESS)throw std::runtime_error("Cannot save UNC settings");
+}
+inline void clipboard(HWND owner,std::wstring_view text) {
+    auto mem=GlobalAlloc(GMEM_MOVEABLE,(text.size()+1)*sizeof(wchar_t));
+    if(!mem)throw std::runtime_error("Cannot allocate clipboard text");
+    auto dest=static_cast<wchar_t*>(GlobalLock(mem));
+    if(!dest){GlobalFree(mem);throw std::runtime_error("Cannot lock clipboard text");}
+    std::copy(text.begin(),text.end(),dest);dest[text.size()]=0;GlobalUnlock(mem);
+    if(!OpenClipboard(owner)){GlobalFree(mem);throw std::runtime_error("Cannot open clipboard");}
+    bool ok=EmptyClipboard()&&SetClipboardData(CF_UNICODETEXT,mem);
+    CloseClipboard();
+    if(!ok){GlobalFree(mem);throw std::runtime_error("Cannot copy UNC path");}
+}
 inline std::vector<std::wstring> arguments() {
     int n=0;LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&n);std::vector<std::wstring> values;
     if(args) {for(int i=1;i<n;++i) values.emplace_back(args[i]);LocalFree(args);}
@@ -90,8 +122,12 @@ inline bool forward(const std::vector<std::wstring>& args) {
     }
     if(!target) return false;
     if(args.empty()) {PostMessageW(target,WM_APP+3,0,0);return true;}
+    ULONG_PTR mode=1;
     for(const auto& a:args) {
-        COPYDATASTRUCT data{1,DWORD((a.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(a.c_str())};
+        if(a==L"--unc") {mode=2;continue;}
+        if(a==L"--drive") {mode=3;continue;}
+        if(a.starts_with(L"--")) continue;
+        COPYDATASTRUCT data{mode,DWORD((a.size()+1)*sizeof(wchar_t)),const_cast<wchar_t*>(a.c_str())};
         DWORD_PTR result=0;
         if(!SendMessageTimeoutW(target,WM_COPYDATA,0,reinterpret_cast<LPARAM>(&data),SMTO_ABORTIFHUNG|SMTO_BLOCK,10000,&result)||!result) return false;
     }

@@ -211,7 +211,6 @@ class UncFs final : public Fsp::FileSystemBase {
         return STATUS_ACCESS_DENIED;
     }
     NTSTATUS Rename(PVOID n,PVOID d,PWSTR from,PWSTR to,BOOLEAN replace) override {
-        if(!allowed())return STATUS_ACCESS_DENIED;
         auto p=owner(d);
         if(p==&shadow)return STATUS_MEDIA_WRITE_PROTECTED;
         std::lock_guard lock(manager);

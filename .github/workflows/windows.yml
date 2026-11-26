@@ -151,7 +151,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [startup, picker, shell, settings, tray-picker, tray, safety, password, recovery]
+        suite: [startup, picker, shell, settings, tray-picker, tray, safety, password, recovery, unc]
     steps:
       - uses: actions/checkout@v4
       - name: Install WinFsp and 7-Zip

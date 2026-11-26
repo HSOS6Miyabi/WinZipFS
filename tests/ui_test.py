@@ -578,8 +578,67 @@ def test_recovery():
     exit_application()
 
 
+def test_unc():
+    import win32clipboard
+    def drive_mask():
+        return ctypes.windll.kernel32.GetLogicalDrives()
+    before=drive_mask()
+    root=ctl("UncRoot").iface_value.CurrentValue
+    assert root.startswith("\\\\WinZipFS\\Archives-"), root
+    value("UncSeconds", 2)
+    click("UncApply")
+    status_contains("UNC settings saved")
+    choose_archive(FIX / "ui.zip", "CopyUnc")
+    status_contains("UNC path copied")
+    win32clipboard.OpenClipboard()
+    try:
+        address=win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+    assert address.startswith(root+"\\") and address.endswith("\\ui.zip"), address
+    assert "0 mounted" in ctl("Summary").window_text()
+    path=Path(address)
+    assert (path/"sample.txt").read_text()=="original"
+    wait_for(lambda: "ui.zip" in ctl("Details").window_text(), "Lazy UNC session missing")
+    assert "UNC" in ctl("Volumes").window_text() or any("UNC" in item.window_text() for item in ctl("Volumes").descendants())
+    assert drive_mask()==before
+    (path/"unc-ui.txt").write_text("UNC UI writeback")
+    wait_for(lambda: "0 mounted" in ctl("Summary").window_text(), "UNC cache did not expire", timeout=45)
+    with ZipFile(FIX/"ui.zip") as archive:
+        assert archive.read("unc-ui.txt")==b"UNC UI writeback"
+    assert (path/"unc-ui.txt").read_text()=="UNC UI writeback"
+    wait_for(lambda: "ui.zip" in ctl("Details").window_text(), "UNC reopen session missing")
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    choose_archive(FIX/"ui.zip","MountUncReadOnly")
+    status_contains("Mounted")
+    assert not ctl("Flush").is_enabled()
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    value("UncSeconds",30)
+    toggle("PreferUnc")
+    click("UncApply")
+    status_contains("UNC settings saved")
+    subprocess.run([str(EXE),str(FIX/"tray.7z")],timeout=30,check=True)
+    status_contains("Mounted")
+    assert "UNC" in ctl("Details").window_text() or root in ctl("Details").window_text()
+    assert drive_mask()==before
+    click("Eject")
+    status_contains("Ejected")
+    choose_archive(FIX/"ui.zip","MountUnc")
+    status_contains("Mounted")
+    assert drive_mask()==before
+    wait_closed()
+    click("Eject")
+    status_contains("Ejected")
+    exit_application()
+
+
 SUITES = {
     "startup": test_startup,
+    "unc": test_unc,
     "safety": test_safety,
     "password": test_password,
     "recovery": test_recovery,

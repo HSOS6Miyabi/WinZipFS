@@ -55,6 +55,11 @@ class Dashboard {
     Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
            systemDefaultsBtn{nullptr},recoveryBtn{nullptr},hideBtn{nullptr},exitBtn{nullptr};
+    Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},uncApplyBtn{nullptr};
+    TextBox uncRoot{nullptr},uncSeconds{nullptr};
+    ToggleSwitch preferUnc{nullptr};
+    shell::UncSettings uncSettings=shell::loadUncSettings();
+    bool uncAvailable=false;
     ToggleSwitch batch{nullptr},solid{nullptr};
     TextBox delay{nullptr},idle{nullptr},threads{nullptr};
     ComboBox level{nullptr},method{nullptr};
@@ -91,7 +96,7 @@ class Dashboard {
     }
     static std::wstring rowText(WzVolume const& row) {
         auto name=std::filesystem::path(row.archive).filename().wstring();
-        return std::wstring(row.mount)+L"   "+name+L"   ·   "+(row.readOnly?L"Read-only":L"Read/write")+
+        return (row.uncMode?std::wstring(L"UNC"):std::wstring(row.mount))+L"   "+name+L"   ·   "+(row.readOnly?L"Read-only":L"Read/write")+
             (row.dirty?L"   ·   Unsaved changes":L"");
     }
     void load(WzOptions const& o) {
@@ -201,7 +206,7 @@ class Dashboard {
     void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false,std::function<void()> retry={}) {
         jobs.push_back({std::move(action),quiet,exit,std::move(retry)});startNext();
     }
-    fire_and_forget promptPassword(std::wstring path) {
+    fire_and_forget promptPassword(std::wstring path,bool uncMode=false) {
         if(dialogOpen) co_return;
         dialogOpen=true;
         try {
@@ -229,7 +234,7 @@ class Dashboard {
             if(result==ContentDialogResult::Primary) secret=std::make_shared<SecretText>(ws(password.Password()));
             password.Password(L"");
             dialogOpen=false;
-            if(secret) mountPath(std::move(path),true,std::move(secret));
+            if(secret) mountPath(std::move(path),true,std::move(secret),uncMode);
             else say(L"Archive mount cancelled.");
         } catch(hresult_error const& e) {
             dialogOpen=false;say(L"Error: "+ws(e.message()));
@@ -238,23 +243,47 @@ class Dashboard {
         }
         startNext();
     }
-    void mountPath(std::wstring path,bool readOnly=false,std::shared_ptr<SecretText> secret={}) {
+    void mountPath(std::wstring path,bool readOnly=false,std::shared_ptr<SecretText> secret={},bool uncMode=false) {
         if(path.empty()) return;
         auto opt=defaults;bool explorer=!noExplorer;
         auto retryPath=path;
-        queue([path=std::move(path),opt,explorer,readOnly,secret=std::move(secret)] {
-            wchar_t drive[16]{};
-            int ok=secret?wz_mount_password(path.c_str(),&opt,secret->value.c_str(),drive,16):
-                   readOnly?wz_mount_readonly(path.c_str(),&opt,drive,16):wz_mount(path.c_str(),&opt,drive,16);
+        queue([path=std::move(path),opt,explorer,readOnly,uncMode,secret=std::move(secret)] {
+            wchar_t drive[32768]{};
+            int ok=uncMode?wz_mount_unc(path.c_str(),&opt,readOnly,secret?secret->value.c_str():nullptr,drive,32768):
+                   secret?wz_mount_password(path.c_str(),&opt,secret->value.c_str(),drive,32768):
+                   readOnly?wz_mount_readonly(path.c_str(),&opt,drive,32768):wz_mount(path.c_str(),&opt,drive,32768);
             if(!ok) return L"Error: "+coreError();
             std::wstring result=L"Mounted "+std::wstring(drive)+L" · "+std::filesystem::path(path).filename().wstring();
             if(explorer&&!shell::open(std::wstring(drive)+L"\\")) result+=L" (Explorer could not be opened)";
             return result;
-        },false,false,[this,retryPath]{promptPassword(retryPath);});
+        },false,false,[this,retryPath,uncMode]{promptPassword(retryPath,uncMode);});
     }
-    void browse(bool readOnly=false) {
-        try {auto p=shell::pick(hwnd);if(!p.empty())mountPath(std::move(p),readOnly);}
+    void browse(bool readOnly=false,bool uncMode=false) {
+        try {auto p=shell::pick(hwnd);if(!p.empty())mountPath(std::move(p),readOnly,{},uncMode);}
         catch(hresult_error const& e){say(L"Error: "+ws(e.message()));}
+    }
+    void refreshUncControls() {
+        wchar_t root[32768]{};
+        uncAvailable=wz_unc_root(root,32768)!=0;
+        uncRoot.Text(uncAvailable?hs(root):hstring(L"UNC namespace unavailable"));
+        uncBtn.IsEnabled(uncAvailable);uncReadOnlyBtn.IsEnabled(uncAvailable);copyUncBtn.IsEnabled(uncAvailable);
+    }
+    void copyUncPath() {
+        try {
+            auto path=shell::pick(hwnd);
+            if(path.empty())return;
+            wchar_t result[32768]{};
+            if(!wz_unc_path(path.c_str(),result,32768)){say(L"Error: "+coreError());return;}
+            shell::clipboard(hwnd,result);
+            say(L"UNC path copied. Open it from any application while WinZipFS is running.");
+        }catch(...){say(L"Error: Cannot copy the UNC path.");}
+    }
+    void applyUncSettings() {
+        try {
+            shell::UncSettings next{static_cast<unsigned>(checkedNumber(uncSeconds,0,86400)),preferUnc.IsOn()};
+            if(!wz_unc_start(&defaults,next.seconds)) {say(L"Error: "+coreError());refreshUncControls();return;}
+            shell::saveUncSettings(next);uncSettings=next;refreshUncControls();say(L"UNC settings saved.");
+        }catch(...){say(L"Error: Enter a cache time from 0 to 86400 seconds.");}
     }
     void exportCopy(std::wstring drive) {
         if(drive.empty()) return;
@@ -357,7 +386,9 @@ class Dashboard {
         try {
             auto o=readOptions();
             if(o.method!=0) {say(L"Error: Default compression method must be Automatic.");return;}
-            shell::saveDefaults(o);defaults=o;say(L"Defaults saved for future mounts.");
+            shell::saveDefaults(o);defaults=o;
+            wz_unc_settings(&defaults,uncSettings.seconds);
+            say(L"Defaults saved for future mounts.");
         }catch(...){say(L"Error: Check numeric ranges and compression settings.");}
     }
     void selectDrive(std::wstring drive) {
@@ -387,6 +418,8 @@ class Dashboard {
         add(root,L"Open WinZipFS",[this]{show();});
         add(root,L"Mount archive…",[this]{show();browse();});
         add(root,L"Mount read-only…",[this]{show();browse(true);});
+        add(root,L"Open UNC archive…",[this]{show();browse(false,true);},MF_STRING|(uncAvailable?0:MF_GRAYED));
+        add(root,L"Copy UNC path…",[this]{show();copyUncPath();},MF_STRING|(uncAvailable?0:MF_GRAYED));
         AppendMenuW(root,MF_SEPARATOR,0,nullptr);
         if(rows.empty()) AppendMenuW(root,MF_STRING|MF_GRAYED,0,L"No mounted archives");
         for(auto const& r:rows) {
@@ -406,7 +439,7 @@ class Dashboard {
             add(sub,L"Eject",[this,drive]{save(drive,true);});
             add(sub,L"Save archive copy…",[this,drive]{exportCopy(drive);},MF_STRING|(r.protectedArchive?MF_GRAYED:0));
             add(sub,L"Discard changes and eject…",[this,drive]{discard(drive);},MF_STRING|(!readOnly&&r.dirty?0:MF_GRAYED));
-            auto title=drive+L"  "+std::filesystem::path(r.archive).filename().wstring();
+            auto title=(r.uncMode?std::wstring(L"UNC"):drive)+L"  "+std::filesystem::path(r.archive).filename().wstring();
             AppendMenuW(root,MF_POPUP,reinterpret_cast<UINT_PTR>(sub),title.c_str());
         }
         AppendMenuW(root,MF_SEPARATOR,0,nullptr);
@@ -449,11 +482,11 @@ class Dashboard {
             if(msg==WM_APP+3){self->show();return 0;}
             if(msg==WM_COPYDATA) {
                 auto data=reinterpret_cast<COPYDATASTRUCT*>(l);
-                if(!data||data->dwData!=1||!data->lpData||data->cbData<sizeof(wchar_t)||
+                if(!data||data->dwData<1||data->dwData>3||!data->lpData||data->cbData<sizeof(wchar_t)||
                    data->cbData>65536||data->cbData%sizeof(wchar_t)) return FALSE;
                 auto p=static_cast<const wchar_t*>(data->lpData);auto n=data->cbData/sizeof(wchar_t);
                 if(p[n-1]!=0||wcsnlen_s(p,n)!=n-1)return FALSE;
-                self->mountPath(p);return TRUE;
+                self->mountPath(p,false,{},data->dwData==2||(data->dwData==1&&self->uncSettings.prefer));return TRUE;
             }
         } catch(...) {self->say(L"Error: Shell operation failed.");return 0;}
         return DefWindowProcW(h,msg,w,l);
@@ -518,6 +551,27 @@ class Dashboard {
         saveDefaultsBtn=button(L"Save as defaults",L"SaveDefaults");
         buttons.Children().Append(applyBtn);buttons.Children().Append(defaultsBtn);buttons.Children().Append(saveDefaultsBtn);
         settings.Children().Append(buttons);page.Children().Append(card(settings));
+        auto uncPanel=vertical(10);
+        uncPanel.Children().Append(text(L"UNC access without drive letters",20,true));
+        uncPanel.Children().Append(text(L"Open an archive by its UNC path from any Windows application while WinZipFS is running. Each archive cache is released after the last handle closes and its idle time expires."));
+        uncRoot=identify(TextBox{},L"UncRoot");
+        uncRoot.Header(box_value(L"Your UNC namespace"));
+        uncRoot.IsReadOnly(true);uncRoot.TextWrapping(TextWrapping::Wrap);
+        uncPanel.Children().Append(uncRoot);
+        auto uncActions=horizontal();
+        uncBtn=button(L"Open UNC archive…",L"MountUnc");
+        uncReadOnlyBtn=button(L"Open UNC read-only…",L"MountUncReadOnly");
+        copyUncBtn=button(L"Copy UNC path…",L"CopyUnc");
+        uncActions.Children().Append(uncBtn);uncActions.Children().Append(uncReadOnlyBtn);uncActions.Children().Append(copyUncBtn);
+        uncPanel.Children().Append(uncActions);
+        uncSeconds=number(L"Cache lifetime (seconds)",L"UncSeconds");
+        uncSeconds.Text(hs(std::to_wstring(uncSettings.seconds)));
+        uncPanel.Children().Append(uncSeconds);
+        uncPanel.Children().Append(text(L"0 releases the archive on the next idle check. Pending modifications are saved before release."));
+        preferUnc=toggle(L"Use UNC for double-click and command-line opening",L"PreferUnc");
+        preferUnc.IsOn(uncSettings.prefer);uncPanel.Children().Append(preferUnc);
+        uncApplyBtn=button(L"Apply UNC settings",L"UncApply");uncPanel.Children().Append(uncApplyBtn);
+        page.Children().Append(card(uncPanel));
         auto integrations=vertical();
         integrations.Children().Append(text(L"Windows integration",20,true));
         integrations.Children().Append(text(L"Register archive file types and choose WinZipFS as their default app in Windows Settings."));
@@ -534,6 +588,10 @@ class Dashboard {
         Grid::SetRow(scroll,1);layout.Children().Append(scroll);window.Content(layout);
         mountBtn.Click([this](auto&&,auto&&){browse();});
         readOnlyBtn.Click([this](auto&&,auto&&){browse(true);});
+        uncBtn.Click([this](auto&&,auto&&){browse(false,true);});
+        uncReadOnlyBtn.Click([this](auto&&,auto&&){browse(true,true);});
+        copyUncBtn.Click([this](auto&&,auto&&){copyUncPath();});
+        uncApplyBtn.Click([this](auto&&,auto&&){applyUncSettings();});
         exportBtn.Click([this](auto&&,auto&&){exportCopy(selected);});
         discardBtn.Click([this](auto&&,auto&&){discard(selected);});
         hideBtn.Click([this](auto&&,auto&&){hide();});
@@ -582,16 +640,21 @@ public:
             if(arg==L"--background")background=true;
         }
         window.Activate();if(background)hide();
+        wz_unc_start(&defaults,uncSettings.seconds);
+        refreshUncControls();
         int recovered=wz_recovery_count();
         if(recovered>0) say(L"Recovered archive sessions are available. Select Recover archive files to save their contents.");
         else if(recovered<0) say(L"Error: "+coreError());
         timer.Interval(std::chrono::seconds(2));
         timer.Tick([this](auto&&,auto&&){if(!trayReady&&!quitting)addTray();if(!busy&&jobs.empty()&&!quitting)queue([]{return wz_tick()?std::wstring{}:L"Error: "+coreError();},true);});
         timer.Start();
+        bool useUnc=uncSettings.prefer;
         for(auto const& arg:args) {
-            if(arg==L"--register") {try{shell::registerAssociations();}catch(...){say(L"Error: Cannot register archive types.");}}
+            if(arg==L"--unc")useUnc=true;
+            else if(arg==L"--drive")useUnc=false;
+            else if(arg==L"--register") {try{shell::registerAssociations();}catch(...){say(L"Error: Cannot register archive types.");}}
             else if(arg==L"--unregister")shell::unregisterAssociations();
-            else if(!arg.starts_with(L"--"))mountPath(arg);
+            else if(!arg.starts_with(L"--"))mountPath(arg,false,{},useUnc);
         }
     }
 };
