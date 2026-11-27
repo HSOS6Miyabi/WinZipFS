@@ -81,6 +81,11 @@ public:
         lru.emplace_front(key,std::move(page));
         try{index.emplace(key,lru.begin());}catch(...){lru.pop_front();throw;}
     }
+    void erase(CacheKey const& key) noexcept {
+        std::lock_guard lock(mutex);
+        auto it=index.find(key);
+        if(it!=index.end()){lru.erase(it->second);index.erase(it);}
+    }
     void drop(uint64_t source) noexcept {
         std::lock_guard lock(mutex);
         auto it=index.lower_bound(CacheKey{source,0,0});
@@ -214,6 +219,9 @@ public:
         return total;
     }
 };
+}
+#include "zip_access.hpp"
+namespace wz {
 class SeekableReader final : public BitAbstractArchiveOpener,public BitInputArchive {
 public:
     SeekableReader(Bit7zLibrary const& lib,std::istream& stream,BitInFormat const& format,std::string const& password)
@@ -243,6 +251,7 @@ class ArchiveSource : public std::enable_shared_from_this<ArchiveSource> {
     std::shared_ptr<ArchiveSource> parent;
     std::unique_ptr<RangeStream> input;
     std::unique_ptr<SeekableReader> reader_;
+    std::unique_ptr<ZipAccess> zip;
     std::map<uint32_t,uint64_t> sizes;
     std::set<uint32_t> sequentialOnly;
     bool protected_=false;
@@ -277,6 +286,11 @@ class ArchiveSource : public std::enable_shared_from_this<ArchiveSource> {
         if(auto hit=memoryPool.lookup(key))return hit;
         auto count=static_cast<size_t>(std::min<uint64_t>(WindowSize,size-base));
         auto page=memoryPool.allocate(count,false);
+        if(zip&&zip->deflated(index)) {
+            ++decodeCalls;
+            zip->readDeflated(index,base,*page);
+            memoryPool.publish(key,page);return page;
+        }
         uint64_t offset=0,received=0;
         bool stop=false,badLength=false;
         ++decodeCalls;
@@ -319,7 +333,11 @@ public:
         auto size=sizeLocked(index);
         if(offset>=size||!count)return 0;
         count=static_cast<size_t>(std::min<uint64_t>(count,size-offset));
-        if(!protected_&&!sequentialOnly.contains(index)) {
+        if(zip&&zip->stored(index)) {
+            zip->readStored(index,offset,out,count);
+            directReadBytes.fetch_add(count,std::memory_order_relaxed);return count;
+        }
+        if(!protected_&&!(zip&&zip->deflated(index))&&!sequentialOnly.contains(index)) {
             CMyComPtr<IInStream> stream;
             try {stream=reader_->stream(index);}
             catch(const BitException&){sequentialOnly.insert(index);}
@@ -360,6 +378,11 @@ public:
             if(*format==BitFormat::Tar)source->input=tarInput(file->size(),read);
             else source->input=std::make_unique<RangeStream>(file->size(),read);
             source->reader_=std::make_unique<SeekableReader>(lib,*source->input,*format,password);
+        }
+        if(*format==BitFormat::Zip&&!multi&&!source->protected_) {
+            source->zip=std::make_unique<ZipAccess>(source->file);
+            for(auto const& item:*source->reader_)if(!item.isDir()&&!item.isEncrypted())
+                source->zip->add(item.index(),item.rawPath(),item.size(),item.crc());
         }
         return source;
     }

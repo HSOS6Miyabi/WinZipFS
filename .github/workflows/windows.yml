@@ -37,9 +37,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item 'C:\Program Files\7-Zip\7z.dll' build/Release/
+          Copy-Item build/vcpkg_installed/x64-windows/bin/*.dll build/Release/ -Force
+          Copy-Item 'C:\Program Files\7-Zip\7z.dll' build/Release/ -Force
           Copy-Item 'C:\Program Files\7-Zip\License.txt' build/Release/7-Zip-License.txt
           Copy-Item build/vcpkg_installed/x64-windows/share/bit7z/copyright build/Release/bit7z-License.txt
+          Copy-Item build/vcpkg_installed/x64-windows/share/libzip/copyright build/Release/libzip-License.txt
+          Copy-Item build/vcpkg_installed/x64-windows/share/zlib/copyright build/Release/zlib-License.txt
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
         with:
@@ -52,10 +55,9 @@ jobs:
         with:
           name: native-build-x64
           path: |
-            build/Release/WinZipFSCore.dll
+            build/Release/*.dll
             build/Release/WinZipFSCore.lib
             build/Release/core-tests.exe
-            build/Release/7z.dll
             build/Release/*-License.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -136,8 +138,7 @@ jobs:
       - name: Assemble application
         shell: pwsh
         run: |
-          Copy-Item build/Release/WinZipFSCore.dll artifacts/app/
-          Copy-Item build/Release/7z.dll artifacts/app/
+          Copy-Item build/Release/*.dll artifacts/app/ -Force
           Copy-Item build/Release/*-License.txt artifacts/app/
           Copy-Item LICENSE artifacts/app/WinZipFS-License.txt
           ./scripts/copy-crt.ps1 -Destination artifacts/app/
