@@ -184,7 +184,12 @@ struct Session {
             throw std::runtime_error("The original archive is open for writing or unavailable. Close the other application and retry.");
         if(!(fingerprint==Fingerprint(source.value)) || !(fingerprint==Fingerprint(original)))
             throw std::runtime_error("Original archive changed; unsaved memory data retained");
-        auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp"+original.extension().wstring());
+        std::wstring extension=original.extension().wstring();
+        if(format.outer)extension=L".tar"+extension;
+        if(format.outer&&format.outer==&BitFormat::GZip)extension=L".tar.gz";
+        if(format.outer&&format.outer==&BitFormat::BZip2)extension=L".tar.bz2";
+        if(format.outer&&format.outer==&BitFormat::Xz)extension=L".tar.xz";
+        auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp"+extension);
         auto backup=original.parent_path()/(L".winzipfs-"+guid()+L".bak");
         bool replacing=false;
         try {
@@ -195,6 +200,30 @@ struct Session {
             if(out==INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot flush new archive");
             BOOL flushed=FlushFileBuffers(out);CloseHandle(out);
             if(!flushed) throw std::runtime_error("Cannot flush new archive");
+            {
+                auto verified=openArchive(lib(),tmp);
+                if(!verified.format.inner) {
+                    auto const& reader=verified.source->reader();
+                    std::string reasons;
+                    for(auto prop:{BitProperty::Comment,BitProperty::Offset,BitProperty::TailSize,
+                                   BitProperty::EmbeddedStubSize,BitProperty::WarningFlags,BitProperty::Characts}) {
+                        auto value=reader.archiveProperty(prop);
+                        if(present(value)) {
+                            reasons+=" property "+std::to_string(static_cast<unsigned>(prop))+"=";
+                            if(value.isString())reasons+=value.getString();
+                            else if(value.isUInt32())reasons+=std::to_string(value.getUInt32());
+                            else if(value.isUInt64())reasons+=std::to_string(value.getUInt64());
+                        }
+                    }
+                    for(auto const& item:reader) {
+                        auto comment=item.itemProperty(BitProperty::Comment);
+                        if(present(comment)&&comment.isString())reasons+=" item "+item.path()+"="+comment.getString();
+                    }
+                    throw std::runtime_error("Generated archive cannot be opened for writing:"+reasons);
+                }
+                if(verified.format.inner!=format.inner||verified.format.outer!=format.outer)
+                    throw std::runtime_error("Generated archive has an unexpected format");
+            }
             if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed during compression");
             replacing=true;
             if(!ReplaceFileW(original.c_str(),tmp.c_str(),backup.c_str(),0,nullptr,nullptr)) {
@@ -217,10 +246,17 @@ struct Session {
                 ptfs.load(std::move(opened.source),original,opened.standalone);
                 fingerprint=committed;format=opened.format;forceRecompress=false;
             }catch(...) {
-                auto retained=original.parent_path()/(L".winzipfs-"+guid()+L".recovered"+original.extension().wstring());
-                if(!ReplaceFileW(original.c_str(),backup.c_str(),retained.c_str(),0,nullptr,nullptr))
-                    throw std::runtime_error("Archive was saved but reopening failed; memory edits and the original backup are retained: "+path8(backup));
-                throw std::runtime_error("Could not reopen saved archive. Original restored; verified replacement retained: "+path8(retained));
+                auto failure=std::current_exception();
+                std::string reason;
+                try{std::rethrow_exception(failure);}catch(std::exception const& e){reason=e.what();}catch(...){reason="Unexpected error";}
+                auto retained=original.parent_path()/(L".winzipfs-"+guid()+L".recovered"+extension);
+                if(!MoveFileExW(original.c_str(),retained.c_str(),MOVEFILE_WRITE_THROUGH)||
+                   !MoveFileExW(backup.c_str(),original.c_str(),MOVEFILE_WRITE_THROUGH)) {
+                    if(GetFileAttributesW(original.c_str())==INVALID_FILE_ATTRIBUTES)
+                        MoveFileExW(retained.c_str(),original.c_str(),MOVEFILE_WRITE_THROUGH);
+                    throw std::runtime_error("Archive reopening failed ("+reason+"); memory edits and original backup retained: "+path8(backup));
+                }
+                throw std::runtime_error("Could not reopen saved archive ("+reason+"). Original restored; verified replacement retained: "+path8(retained));
             }
             fs::remove(backup,ec);
             status=incremental?L"Saved · incremental":L"Saved · recompressed";
