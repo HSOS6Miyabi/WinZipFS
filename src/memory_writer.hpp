@@ -11,6 +11,7 @@ struct LoadedArchive {
 inline LoadedArchive openArchive(Bit7zLibrary const& lib,fs::path const& path,
                                  std::string const& password={},bool forceReadOnly=false) {
     try {
+        const bool writable=!forceReadOnly&&password.empty()&&isWritable(path);
         auto source=ArchiveSource::open(lib,path,password);
         auto const& outer=source->reader();
         auto format=formatFor(path,outer.detectedFormat());
@@ -32,7 +33,7 @@ inline LoadedArchive openArchive(Bit7zLibrary const& lib,fs::path const& path,
             restricted=restricted||archiveReadOnly(source->reader())||zstdTar;
         }
         restricted=validateArchive(source->reader(),!password.empty(),standalone)||restricted;
-        if(forceReadOnly||!password.empty()||restricted||!isWritable(path))format={};
+        if(!writable||restricted)format={};
         return {std::move(source),format,standalone};
     }catch(BitException const& e) {
         if(e.code()==BitFailureSource::WrongPassword||
@@ -216,7 +217,7 @@ public:
         return done;
     }
 };
-inline void verifyArchive(SeekableReader const& reader,MemoryFs const& fs) {
+inline void verifyArchive(SeekableReader const& reader,MemoryFs const& fs,bool incremental) {
     std::set<std::wstring,CaseLess> seen,explicitNames;
     for(auto const& item:reader) {
         auto name=safeName(item.rawPath(),item.isDir());
@@ -226,6 +227,37 @@ inline void verifyArchive(SeekableReader const& reader,MemoryFs const& fs) {
            (!item.isDir()&&expected->second->size!=item.size())||!explicitNames.insert(name).second)
             throw std::runtime_error("Generated archive does not match requested files");
         seen.insert(name);
+        auto const& node=*expected->second;
+        if(!node.directory) {
+            if(incremental&&node.sourceIndex&&!node.dataDirty) {
+                auto original=fs.source()->reader().itemProperty(*node.sourceIndex,BitProperty::CRC);
+                auto actual=reader.itemProperty(item.index(),BitProperty::CRC);
+                if(original.isUInt32()&&(!actual.isUInt32()||original.getUInt32()!=actual.getUInt32()))
+                    throw std::runtime_error("Unchanged archive entry CRC mismatch: "+utf8(name));
+            }else {
+                uint64_t offset=0;
+                std::exception_ptr failure;
+                std::array<unsigned char,65536> expectedBytes{};
+                try {
+                    reader.extractTo(RawDataCallback([&](const byte_t* data,size_t count) {
+                        try {
+                            if(count>node.size-offset)throw std::runtime_error("Generated file is longer than expected");
+                            size_t done=0;
+                            while(done<count) {
+                                auto n=std::min(expectedBytes.size(),count-done);
+                                if(fs.readData(node,offset+done,expectedBytes.data(),n)!=n||
+                                   memcmp(expectedBytes.data(),reinterpret_cast<const unsigned char*>(data)+done,n))
+                                    throw std::runtime_error("Generated archive data mismatch: "+utf8(name));
+                                done+=n;
+                            }
+                            offset+=count;return true;
+                        }catch(...){failure=std::current_exception();return false;}
+                    }),item.index());
+                }catch(...){if(failure)std::rethrow_exception(failure);throw;}
+                if(failure)std::rethrow_exception(failure);
+                if(offset!=node.size)throw std::runtime_error("Generated file is shorter than expected");
+            }
+        }
         for(auto parent=parentName(name);!parent.empty();parent=parentName(parent))seen.insert(parent);
     }
     for(auto const& [name,node]:fs.entries())if(!name.empty()&&!seen.contains(name))
@@ -251,6 +283,6 @@ inline void packMemory(Bit7zLibrary const& lib,MemoryFs const& fs,fs::path const
     }
     auto result=ArchiveSource::open(lib,output,{},fmt.outer?static_cast<const BitInFormat*>(fmt.outer):fmt.inner);
     if(fmt.outer)result=ArchiveSource::tar(lib,result);
-    verifyArchive(result->reader(),fs);
+    verifyArchive(result->reader(),fs,original&&incrementalFormat(fmt));
 }
 }

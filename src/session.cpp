@@ -208,15 +208,19 @@ struct Session {
                 ReplaceFileW(original.c_str(),backup.c_str(),packed.c_str(),0,nullptr,nullptr);
                 throw std::runtime_error("Original archive was replaced concurrently; unsaved memory data and replacement backups retained");
             }
-            fingerprint=Fingerprint(original);
-            // Reopen the committed archive and rebind item indices. No
-            // extracted file or pending modification is written to a cache directory.
-            forceRecompress=true;
-            auto opened=openArchive(lib(),original);
-            if(!opened.format.inner)throw std::runtime_error("Saved archive could not be reopened for writing");
-            ptfs.load(std::move(opened.source),original,opened.standalone);
-            format=opened.format;
-            forceRecompress=false;
+            try {
+                auto committed=Fingerprint(original);
+                auto opened=openArchive(lib(),original);
+                if(!opened.format.inner)throw std::runtime_error("Saved archive could not be reopened for writing");
+                if(!(committed==Fingerprint(original)))throw std::runtime_error("Saved archive changed while reopening");
+                ptfs.load(std::move(opened.source),original,opened.standalone);
+                fingerprint=committed;format=opened.format;forceRecompress=false;
+            }catch(...) {
+                auto retained=original.parent_path()/(L".winzipfs-"+guid()+L".recovered"+original.extension().wstring());
+                if(!ReplaceFileW(original.c_str(),backup.c_str(),retained.c_str(),0,nullptr,nullptr))
+                    throw std::runtime_error("Archive was saved but reopening failed; memory edits and the original backup are retained: "+path8(backup));
+                throw std::runtime_error("Could not reopen saved archive. Original restored; verified replacement retained: "+path8(retained));
+            }
             fs::remove(backup,ec);
             status=incremental?L"Saved · incremental":L"Saved · recompressed";
         } catch(...) {
@@ -291,8 +295,8 @@ inline bool inside(const fs::path& path,const fs::path& parent) {
 inline void independentPath(const fs::path& p) {
     if(lower(p.wstring()).starts_with(L"\\\\winzipfs\\")) throw std::runtime_error("Choose a path outside the WinZipFS UNC namespace");
     for(const auto& session:sessions) {
-        if((!session->uncMode&&same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring())) )
-            throw std::runtime_error("Choose a path outside mounted archive drives and their caches");
+        if(!session->uncMode&&same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring()))
+            throw std::runtime_error("Choose a path outside mounted archive drives");
     }
     if(inside(p,local())) throw std::runtime_error("Choose a path outside the recovery cache");
 }

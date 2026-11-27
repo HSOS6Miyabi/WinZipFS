@@ -100,7 +100,8 @@ class UncFs final : public Fsp::FileSystemBase {
         std::wstring name(raw?raw:L"");
         if(name==L"\\") return {&shadow,L"\\"};
         if(name.empty()||name.front()!=L'\\')throw std::runtime_error("Invalid UNC path");
-        safeName(name.substr(1),false);
+        auto normalized=safeName(name.substr(1),false);
+        if(normalized!=name.substr(1))throw std::runtime_error("Invalid UNC path");
         // Reuse the same archive cache even if the source has changed externally.
         for(auto const& item:sessions) if(item->uncMode) {
             auto relative=item->drive.substr(address.size());

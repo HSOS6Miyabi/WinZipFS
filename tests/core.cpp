@@ -119,9 +119,7 @@ void safety(fs::path const& archive,const fs::path& directory) {
     write(root/L"cached.txt","unsaved");
     waitClosed(drive);
     h=CreateFileW(archive.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
-    require(h!=INVALID_HANDLE_VALUE,"hold external writer");
-    require(wz_flush(drive.c_str())==0,"reject active external writer");
-    CloseHandle(h);
+    require(h==INVALID_HANDLE_VALUE&&GetLastError()==ERROR_SHARING_VIOLATION,"source archive denies in-place external writes");
     require(read(archive)==before&&volume(drive).dirty,"original and pending data preserved");
     auto copy=directory/L"export-copy.7z";
     require(wz_save_copy(drive.c_str(),copy.c_str())==1,"export unsaved data");
@@ -215,28 +213,26 @@ void readonly(fs::path const& archive) {
 void conflict(fs::path const& archive) {
     WzOptions o{};wz_default_options(&o);o.batch=1;
     auto original=read(archive);
-    FILETIME modified{};
-    HANDLE h=CreateFileW(archive.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                        nullptr,OPEN_EXISTING,0,nullptr);
-    require(h!=INVALID_HANDLE_VALUE,"open original attributes");
-    BOOL ok=GetFileTime(h,nullptr,nullptr,&modified);CloseHandle(h);
-    require(ok!=0,"original timestamp");
-    auto drive=mount(archive,o);
-    auto path=fs::path(drive+L"\\")/L"conflict.txt";
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    auto path=root/L"conflict.txt";
     write(path,"cached modification");waitClosed(drive);
+    HANDLE writer=CreateFileW(archive.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                              nullptr,OPEN_EXISTING,0,nullptr);
+    require(writer==INVALID_HANDLE_VALUE&&GetLastError()==ERROR_SHARING_VIOLATION,"deny in-place source write");
+    auto saved=archive.parent_path()/L"conflict-original.zip";
+    require(MoveFileExW(archive.c_str(),saved.c_str(),MOVEFILE_WRITE_THROUGH)!=0,"external source rename");
     auto external=original+"external modification";
     write(archive,external);
-    require(wz_flush(drive.c_str())==0,"external modification rejected");
+    require(wz_flush(drive.c_str())==0,"external replacement rejected");
     require(read(archive)==external,"external archive preserved");
-    require(volume(drive).dirty&&read(path)=="cached modification","cached edits retained");
+    require(volume(drive).dirty&&read(path)=="cached modification","memory edits retained");
+    require(read(root/L"sample.txt")=="original","source handle remains on original archive");
     waitClosed(drive);
-    write(archive,original);
-    h=CreateFileW(archive.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                  nullptr,OPEN_EXISTING,0,nullptr);
-    require(h!=INVALID_HANDLE_VALUE,"restore original attributes");
-    ok=SetFileTime(h,nullptr,nullptr,&modified);CloseHandle(h);
-    require(ok!=0,"restore original timestamp");
-    require(wz_flush(drive.c_str())==1,"recover after external conflict");
+    auto copy=archive.parent_path()/L"conflict-recovery.zip";
+    require(wz_save_copy(drive.c_str(),copy.c_str())==1,"export from retained original source");
+    fs::remove(archive);
+    require(MoveFileExW(saved.c_str(),archive.c_str(),MOVEFILE_WRITE_THROUGH)!=0,"restore original path");
+    require(wz_flush(drive.c_str())==1,"save after external conflict");
     eject(drive);
     drive=mount(archive,o);
     require(read(fs::path(drive+L"\\")/L"conflict.txt")=="cached modification","recovered edits persisted");

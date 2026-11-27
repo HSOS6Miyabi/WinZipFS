@@ -191,7 +191,7 @@ class DiskInput {
     BY_HANDLE_FILE_INFORMATION initial{};
 public:
     explicit DiskInput(fs::path const& path) {
-        file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,
                          nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_RANDOM_ACCESS,nullptr);
         if(file==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot open compressed archive");
         if(!GetFileInformationByHandle(file,&initial)) {
@@ -370,6 +370,7 @@ public:
     static std::shared_ptr<ArchiveSource> open(Bit7zLibrary const& lib,fs::path const& path,
                                                std::string const& password,BitInFormat const* expected=nullptr) {
         auto source=std::make_shared<ArchiveSource>();
+        source->file=std::make_shared<DiskInput>(path);
         const BitInFormat* format=expected;
         bool multi=false;
         if(!format) {
@@ -379,7 +380,6 @@ public:
                 source->standaloneName_=probe.itemAt(0).rawPath();
             if(probe.hasEncryptedItems()&&password.empty())throw PasswordRequired();
         }
-        source->file=std::make_shared<DiskInput>(path);
         source->protected_=!password.empty();
         if(multi)source->reader_=std::make_unique<SeekableReader>(lib,path,*format,password);
         else {

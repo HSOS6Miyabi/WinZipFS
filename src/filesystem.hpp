@@ -200,6 +200,11 @@ public:
                 throw std::runtime_error("Conflicting archive entries");
             next[name]=std::move(node);
         }
+        for(auto& [name,node]:next) {
+            auto previous=nodes.find(name);
+            if(previous!=nodes.end()&&previous->second->directory==node->directory)
+                node->id=previous->second->id;
+        }
         nodes.swap(next);source_=std::move(source);dirty=false;
     }
     // Directory-only namespace for UNC routing; it contains no archived data.
@@ -431,6 +436,7 @@ public:
         auto node=descriptor(desc).node;
         auto old=node->name,newName=volumeName(newRaw);
         if(old.empty()||newName.empty())return STATUS_ACCESS_DENIED;
+        if(find(old)!=node)return STATUS_FILE_DELETED;
         auto parent=find(parentName(newName));if(!parent||!parent->directory)return STATUS_OBJECT_PATH_NOT_FOUND;
         newName=parent->name.empty()?baseName(newName):parent->name+L"\\"+baseName(newName);
         if(node->directory&&underPath(newName,old)&&!same(old,newName))return STATUS_ACCESS_DENIED;
