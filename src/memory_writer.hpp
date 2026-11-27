@@ -217,14 +217,15 @@ public:
     }
 };
 inline void verifyArchive(SeekableReader const& reader,MemoryFs const& fs) {
-    std::set<std::wstring,CaseLess> seen;
+    std::set<std::wstring,CaseLess> seen,explicitNames;
     for(auto const& item:reader) {
         auto name=safeName(item.rawPath(),item.isDir());
         if(name.empty())continue;
         auto expected=fs.entries().find(name);
         if(expected==fs.entries().end()||expected->first!=name||expected->second->directory!=item.isDir()||
-           (!item.isDir()&&expected->second->size!=item.size())||!seen.insert(name).second)
+           (!item.isDir()&&expected->second->size!=item.size())||!explicitNames.insert(name).second)
             throw std::runtime_error("Generated archive does not match requested files");
+        seen.insert(name);
         for(auto parent=parentName(name);!parent.empty();parent=parentName(parent))seen.insert(parent);
     }
     for(auto const& [name,node]:fs.entries())if(!name.empty()&&!seen.contains(name))

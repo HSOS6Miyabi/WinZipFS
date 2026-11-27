@@ -162,7 +162,8 @@ std::map<std::wstring,uint64_t> cacheFiles() {
     return result;
 }
 void recovery(fs::path const& archive,const fs::path& output) {
-    auto before=read(archive),cacheBefore=cacheFiles();
+    auto before=read(archive);
+    auto cacheBefore=cacheFiles();
     wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
     std::wstring command=L"\""+std::wstring(exe)+L"\" --crash-fixture \""+archive.wstring()+L"\"";
     STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION child{};
