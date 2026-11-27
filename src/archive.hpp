@@ -107,6 +107,12 @@ template<class Reader> inline bool validateArchive(const Reader& reader,bool all
     std::map<std::wstring,bool,CaseLess> names, prefixes;
     uint64_t total=0;
     bool metadataSensitive=false;
+    bool tar=reader.detectedFormat()==BitFormat::Tar;
+    if(tar) {
+        auto characteristics=reader.archiveProperty(BitProperty::Characts);
+        if(characteristics.isString()&&characteristics.getString().find("SCHILY.fflags")!=std::string::npos)
+            metadataSensitive=true;
+    }
     if(reader.hasEncryptedItems()&&!allowEncrypted) throw PasswordRequired();
     for(const auto& item:reader) {
         if(item.isSymLink() || (item.attributes() & FILE_ATTRIBUTE_REPARSE_POINT) ||
@@ -115,8 +121,16 @@ template<class Reader> inline bool validateArchive(const Reader& reader,bool all
            present(reader.itemProperty(item.index(),BitProperty::IsAltStream)) ||
            present(reader.itemProperty(item.index(),BitProperty::IsAnti)))
             throw std::runtime_error("Archive contains links, alternate streams or special entries");
-        if(present(reader.itemProperty(item.index(),BitProperty::Comment)) ||
-           present(reader.itemProperty(item.index(),BitProperty::NtSecure))) metadataSensitive=true;
+        auto comment=reader.itemProperty(item.index(),BitProperty::Comment);
+        bool hasComment=present(comment);
+        if(tar&&comment.isString()) {
+            // 7-Zip reports a PAX record's header name followed by LF as
+            // the item comment. Unrecognized PAX key/value lines follow it.
+            auto value=comment.getString();
+            if(!value.empty()&&value.back()=='\n')value.pop_back();
+            if(!value.empty()&&value.find_first_of("\r\n=")==std::string::npos)hasComment=false;
+        }
+        if(hasComment||present(reader.itemProperty(item.index(),BitProperty::NtSecure)))metadataSensitive=true;
         if(standalone&&item.rawPath().empty()) continue;
         auto name=safeName(item.rawPath(),item.isDir());
         auto posix=reader.itemProperty(item.index(),BitProperty::PosixAttrib);

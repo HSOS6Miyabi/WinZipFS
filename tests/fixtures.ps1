@@ -77,6 +77,12 @@ for name, mode in (("metadata.tar", "w"), ("metadata.tar.gz", "w:gz")):
         info.uname, info.gname = "example-user", "example-group"
         info.mtime = 1712345678.125
         tar.addfile(info, BytesIO(b"old"))
+with tarfile.open(root / "pax-extra.tar", "w", format=tarfile.PAX_FORMAT) as tar:
+    from io import BytesIO
+    info = tarfile.TarInfo("sample.txt")
+    info.size = 8
+    info.pax_headers = {"SCHILY.xattr.user.example": "preserve-me"}
+    tar.addfile(info, BytesIO(b"original"))
 with tarfile.open(root / "special.tar", "w") as tar:
     info = tarfile.TarInfo("fifo")
     info.type = tarfile.FIFOTYPE

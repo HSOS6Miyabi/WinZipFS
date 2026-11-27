@@ -578,7 +578,7 @@ int wmain(int argc,wchar_t** argv) {
                 require(wz_mount((root/name).c_str(),&o,rejected,16)==0,"unsafe or encrypted archive rejected");
                 require(wz_count()==0,"rejected archive left no mounted volume");
             }
-            for(auto name:{L"readonly.cab",L"sample.txt.gz",L"sample.txt.bz2",L"sample.txt.xz",L"sample.txt.zst",L"core.tar.zst"}) {
+            for(auto name:{L"readonly.cab",L"sample.txt.gz",L"sample.txt.bz2",L"sample.txt.xz",L"sample.txt.zst",L"core.tar.zst",L"pax-extra.tar"}) {
                 std::wcout<<L"Testing read-only "<<name<<std::endl;
                 readonly(root/name);
             }
