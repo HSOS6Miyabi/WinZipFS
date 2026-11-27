@@ -2,6 +2,7 @@
 #include <winfsp/winfsp.hpp>
 #include <sddl.h>
 #include "memory_archive.hpp"
+#include <7zip/PropID.h>
 
 namespace wz {
 inline std::atomic<uint64_t> nodeIds{1};
