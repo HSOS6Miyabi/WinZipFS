@@ -231,3 +231,30 @@ jobs:
           name: WinZipFS-Setup-x64
           path: artifacts/installer/WinZipFS-Setup-x64.exe
           if-no-files-found: error
+
+  release:
+    name: Publish verified GitHub Release
+    needs: package
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: winzipfs-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: WinZipFS-windows-x64
+          path: artifacts/app/
+      - uses: actions/download-artifact@v4
+        with:
+          name: WinZipFS-Setup-x64
+          path: artifacts/installer/
+      - name: Verify and publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-release.sh

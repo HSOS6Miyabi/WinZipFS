@@ -4,7 +4,7 @@ WinZipFS opens archives as Windows drives or UNC paths using WinFsp, with a nati
 
 ## Install
 
-Download the Windows x64 installer or portable package from the latest successful [Windows build](https://github.com/HSOS6Miyabi/WinZipFS/actions/workflows/windows.yml). The installer adds a Start menu shortcut, registers archive types and installs WinFsp if required. Windows may request administrator approval for the driver. To enable double-click mounting for an existing association, choose WinZipFS in Windows Default apps.
+Download the Windows x64 installer or portable package from [GitHub Releases](https://github.com/HSOS6Miyabi/WinZipFS/releases/latest). Each release includes SHA-256 checksums for both packages. The installer adds a Start menu shortcut, registers archive types and installs WinFsp if required. Windows may request administrator approval for the driver. To enable double-click mounting for an existing association, choose WinZipFS in Windows Default apps.
 
 For the portable package, extract all files to a permanent folder and install [WinFsp](https://winfsp.dev/rel/) 2.2 or later. Open WinZipFS and select Register file types. Before upgrading or uninstalling, exit WinZipFS from the notification area so that pending modifications are saved. Uninstalling preserves recovery files and the shared WinFsp driver.
 
@@ -50,7 +50,7 @@ A replacement archive is generated beside the original, tested using the 7-Zip e
 
 ## Build
 
-Prerequisites: Windows x64, Visual Studio 2022 with C++ desktop and Windows SDK, CMake, vcpkg, WinFsp 2.2 with developer files, and the full 7-Zip 26.06 DLL. The workflow in .github/workflows/windows.yml builds and tests the native core and WinUI 3 application.
+Prerequisites: Windows x64, Visual Studio 2022 with C++ desktop and Windows SDK, CMake, vcpkg, WinFsp 2.2 with developer files, and the full 7-Zip 26.06 DLL. The workflow in `.github/workflows/windows.yml` builds and tests the native core, the WinUI 3 application and the installer. After all tests pass, CI publishes a new version to GitHub Releases using the tested binaries. Published versions are immutable; update the version in `CMakeLists.txt`, `vcpkg.json` and `installer/WinZipFS.iss` together for a subsequent release.
 
 ```powershell
 cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
