@@ -119,6 +119,12 @@ template<class Reader> inline bool validateArchive(const Reader& reader,bool all
            present(reader.itemProperty(item.index(),BitProperty::NtSecure))) metadataSensitive=true;
         if(standalone&&item.rawPath().empty()) continue;
         auto name=safeName(item.rawPath(),item.isDir());
+        auto posix=reader.itemProperty(item.index(),BitProperty::PosixAttrib);
+        if(posix.isUInt32()) {
+            auto type=posix.getUInt32()&0170000;
+            if(type&&type!=0100000&&type!=0040000)
+                throw std::runtime_error("Archive contains a non-regular POSIX entry");
+        }
         if(name.empty()) continue;
         auto [it,ok]=names.emplace(name,item.isDir());
         if(!ok) throw std::runtime_error("Archive contains duplicate or case-conflicting names");

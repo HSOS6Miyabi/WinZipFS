@@ -1,6 +1,6 @@
 # WinZipFS
 
-WinZipFS mounts archives as Windows drives using WinFsp, with a native C++20 core, the 7-Zip engine through bit7z, and a WinUI 3 desktop interface.
+WinZipFS opens archives as Windows drives or UNC paths using WinFsp, with a native C++20 core, the 7-Zip engine through bit7z, libzip/zlib random access, and a responsive WinUI 3 desktop interface.
 
 ## Install
 
@@ -56,7 +56,8 @@ Prerequisites: Windows x64, Visual Studio 2022 with C++ desktop and Windows SDK,
 cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
 cmake --build build --config Release
 msbuild ui/WinZipFS.vcxproj /restore /p:Configuration=Release /p:Platform=x64
-Copy-Item build/Release/WinZipFSCore.dll artifacts/app/
+Copy-Item build/vcpkg_installed/x64-windows/bin/*.dll artifacts/app/ -Force
+Copy-Item build/Release/WinZipFSCore.dll artifacts/app/ -Force
 Copy-Item 'C:\Program Files\7-Zip\7z.dll' artifacts/app/
 ```
 
@@ -64,4 +65,4 @@ Run `artifacts/app/WinZipFS.exe` or pass an archive path as the first argument. 
 
 ## Third-party software
 
-WinFsp 2.2 (GPL-3.0); bit7z 4.1 (MPL-2.0); 7-Zip (LGPL/BSD with unRAR restriction); Microsoft Windows App SDK and C++/WinRT.
+WinFsp 2.2 (GPL-3.0); bit7z 4.1 (MPL-2.0); 7-Zip (LGPL/BSD with unRAR restriction); libzip (BSD-3-Clause); zlib (Zlib); Microsoft Windows App SDK and C++/WinRT.

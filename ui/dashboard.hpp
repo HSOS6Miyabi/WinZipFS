@@ -59,7 +59,7 @@ class Dashboard {
     TextBlock summary{nullptr},details{nullptr},message{nullptr},heading{nullptr},description{nullptr};
     Grid toolbar{nullptr};
     std::vector<StackPanel> adaptiveGroups;
-    bool compact=false;
+    int layoutColumns=0;
     ProgressRing progress{nullptr};
     Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
@@ -101,12 +101,14 @@ class Dashboard {
     void arrange(double width,double height) {
         if(width<=0)return;
         bool narrow=width<780;
-        compact=narrow;
+        description.Visibility(narrow||height<600?Visibility::Collapsed:Visibility::Visible);
+        int columns=narrow?2:4;
+        if(layoutColumns==columns)return;
+        layoutColumns=columns;
         for(auto const& group:adaptiveGroups)
             group.Orientation(narrow?Orientation::Vertical:Orientation::Horizontal);
         auto& grid=toolbar;
         grid.ColumnDefinitions().Clear();grid.RowDefinitions().Clear();
-        int columns=narrow?2:4;
         for(int i=0;i<columns;++i) {
             ColumnDefinition col;col.Width(GridLength{1,GridUnitType::Star});grid.ColumnDefinitions().Append(col);
         }
@@ -118,7 +120,6 @@ class Dashboard {
             Grid::SetRow(child,int(i)/columns);Grid::SetColumn(child,int(i)%columns);
         }
         heading.FontSize(narrow?24:32);
-        description.Visibility(narrow||height<600?Visibility::Collapsed:Visibility::Visible);
     }
     static Border card(UIElement const& content) {
         Border b;b.CornerRadius(CornerRadius{10,10,10,10});b.Padding(Thickness{18,16,18,16});
@@ -265,9 +266,12 @@ class Dashboard {
             Application::Current().Exit();
             co_return;
         }
-        if(!failed&&job.completed)job.completed();
-        refresh();
-        if(requestPassword) job.passwordRetry();
+        try {
+            if(!failed&&job.completed)job.completed();
+            refresh();
+            if(requestPassword) job.passwordRetry();
+        }catch(hresult_error const& e){say(L"Error: "+ws(e.message()));}
+        catch(...){say(L"Error: Cannot refresh the archive list.");}
         startNext();
     }
     void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false,
@@ -379,15 +383,24 @@ class Dashboard {
     fire_and_forget recoveryDialog() {
         if(dialogOpen||busy) {say(L"An operation is already in progress.");co_return;}
         dialogOpen=true;
+        show();
+        apartment_context ui;
+        progress.IsActive(true);say(L"Working…");
+        co_await resume_background();
+        std::vector<WzRecovery> entries;
+        std::wstring failure;
         try {
-            show();
-            std::vector<WzRecovery> entries;
             int count=wz_recovery_count();
-            if(count<0) throw std::runtime_error("Cannot read recovery sessions");
+            if(count<0)throw std::runtime_error("Cannot read recovery sessions");
             for(int i=0;i<count;++i) {
                 WzRecovery entry{};
-                if(wz_recovery_get(i,&entry)) entries.push_back(entry);
+                if(wz_recovery_get(i,&entry))entries.push_back(entry);
             }
+        }catch(...){failure=L"Error: Cannot access recovery sessions.";}
+        co_await ui;
+        progress.IsActive(false);
+        try {
+            if(!failure.empty()){say(failure);dialogOpen=false;startNext();co_return;}
             if(entries.empty()) {
                 say(L"No abandoned archive sessions to recover.");
                 dialogOpen=false;startNext();co_return;
@@ -565,8 +578,8 @@ class Dashboard {
             int width=MulDiv(440,dpi,96),height=MulDiv(480,dpi,96);
             MONITORINFO monitor{sizeof(monitor)};
             if(GetMonitorInfoW(MonitorFromWindow(h,MONITOR_DEFAULTTONEAREST),&monitor)) {
-                width=std::min(width,monitor.rcWork.right-monitor.rcWork.left);
-                height=std::min(height,monitor.rcWork.bottom-monitor.rcWork.top);
+                width=std::min(width,static_cast<int>(monitor.rcWork.right-monitor.rcWork.left));
+                height=std::min(height,static_cast<int>(monitor.rcWork.bottom-monitor.rcWork.top));
             }
             minmax->ptMinTrackSize.x=width;minmax->ptMinTrackSize.y=height;
             return result;

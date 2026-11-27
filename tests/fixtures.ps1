@@ -67,6 +67,10 @@ with ZipFile(root / "random-stored.zip", "w", compression=ZIP_STORED) as z:
         source = Pattern()
         while chunk := source.read(MIB):
             out.write(chunk)
+with tarfile.open(root / "special.tar", "w") as tar:
+    info = tarfile.TarInfo("fifo")
+    info.type = tarfile.FIFOTYPE
+    tar.addfile(info)
 with tarfile.open(root / "random.tar", "w") as tar:
     info = tarfile.TarInfo("large.bin")
     info.size = 64*MIB

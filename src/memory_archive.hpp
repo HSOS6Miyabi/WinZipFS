@@ -189,6 +189,7 @@ inline std::unique_ptr<RangeStream> tarInput(uint64_t size,
 class DiskInput {
     HANDLE file=INVALID_HANDLE_VALUE;
     BY_HANDLE_FILE_INFORMATION initial{};
+    std::mutex io;
 public:
     explicit DiskInput(fs::path const& path) {
         file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,
@@ -211,6 +212,7 @@ public:
             throw std::runtime_error("Original archive changed during the session");
     }
     size_t read(uint64_t offset,void* out,size_t count) {
+        std::lock_guard lock(io);
         if(offset>=size())return 0;
         count=static_cast<size_t>(std::min<uint64_t>(count,size()-offset));
         LARGE_INTEGER seek{};seek.QuadPart=static_cast<LONGLONG>(offset);

@@ -104,7 +104,8 @@ struct Fingerprint {
     }
 };
 inline void checkOptions(const WzOptions& o) {
-    if(o.delaySeconds<1||o.delaySeconds>3600||o.idleMinutes<0||o.idleMinutes>1440||
+    if((o.batch!=0&&o.batch!=1)||(o.solid!=0&&o.solid!=1)||
+       o.delaySeconds<1||o.delaySeconds>3600||o.idleMinutes<0||o.idleMinutes>1440||
        (o.level!=0&&o.level!=1&&o.level!=3&&o.level!=5&&o.level!=7&&o.level!=9)||
        o.method<0||o.method>4||o.threads<0||o.threads>256) throw std::runtime_error("Invalid compression or cache settings");
 }

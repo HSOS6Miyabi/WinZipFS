@@ -405,6 +405,56 @@ void memoryPressure(fs::path const& archive) {
     require(cacheFiles()==disk,"save under memory pressure creates no extracted cache");
     require(wz_memory_limit(512)==1,"restore cache limit");
 }
+void largeOffset(fs::path const& archive) {
+    auto disk=cacheFiles();WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    auto path=root/L"large-offset.bin";
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,CREATE_NEW,FILE_FLAG_WRITE_THROUGH,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"create large logical file");
+    constexpr uint64_t far=5ull*1024*1024*1024+123;
+    LARGE_INTEGER position{};position.QuadPart=far;
+    require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)!=0,"seek past 4 GiB");
+    char value='X';DWORD written=0;
+    require(WriteFile(file,&value,1,&written,nullptr)&&written==1,"write above 4 GiB");
+    LARGE_INTEGER size{};require(GetFileSizeEx(file,&size)&&uint64_t(size.QuadPart)==far+1,"64-bit logical file size");
+    require(rangeRead(file,far-1,2)==std::string("\0X",2),"large sparse offset");
+    position.QuadPart=64;require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)&&SetEndOfFile(file),"truncate large file");
+    position.QuadPart=128;require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)&&SetEndOfFile(file),"extend truncated file");
+    require(rangeRead(file,0,128)==std::string(128,'\0'),"truncate clears former data");
+    CloseHandle(file);waitClosed(drive);
+    require(wz_flush(drive.c_str())==1,"save truncated file");
+    require(cacheFiles()==disk,"64-bit writes create no disk cache");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(read(root/L"large-offset.bin")==std::string(128,'\0'),"persisted truncated contents");
+    eject(drive);
+}
+void mappedAccess(fs::path const& archive) {
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    auto path=root/L"mapped.bin";
+    write(path,std::string(65536,'A'));
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,OPEN_EXISTING,0,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"open memory mapped file");
+    HANDLE mapping=CreateFileMappingW(file,nullptr,PAGE_READWRITE,0,0,nullptr);
+    require(mapping!=nullptr,"create file mapping");
+    auto view=static_cast<char*>(MapViewOfFile(mapping,FILE_MAP_WRITE|FILE_MAP_READ,0,0,0));
+    require(view!=nullptr&&view[32768]=='A',"read mapped file");
+    view[32768]='B';
+    require(FlushViewOfFile(view,0)!=0,"flush mapped view");
+    UnmapViewOfFile(view);CloseHandle(mapping);
+    require(FlushFileBuffers(file)!=0,"flush mapped file");
+    CloseHandle(file);waitClosed(drive);
+    require(wz_flush(drive.c_str())==1,"save mapped edits");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    auto actual=read(root/L"mapped.bin");
+    auto expected=std::string(65536,'A');expected[32768]='B';
+    require(actual==expected,"memory mapped write persisted");
+    eject(drive);
+}
 void uncMode(fs::path const& fixtures) {
     std::wcout<<L"Testing UNC on-demand namespace"<<std::endl;
     auto first=fixtures/L"unc first.zip",second=fixtures/L"unc second.7z";
@@ -506,7 +556,7 @@ int wmain(int argc,wchar_t** argv) {
         if(argc==2) {
             fs::path root=argv[1];
             for(auto ext:{L".zip",L".7z",L".tar",L".tar.gz",L".tar.bz2",L".tar.xz"})roundtrip(root/(std::wstring(L"core")+ext));
-            for(auto name:{L"traversal.zip",L"collision.zip",L"reserved.zip",L"encrypted.zip"}) {
+            for(auto name:{L"traversal.zip",L"collision.zip",L"reserved.zip",L"encrypted.zip",L"special.tar"}) {
                 wchar_t rejected[16]{};
                 require(wz_mount((root/name).c_str(),&o,rejected,16)==0,"unsafe or encrypted archive rejected");
                 require(wz_count()==0,"rejected archive left no mounted volume");
@@ -536,6 +586,10 @@ int wmain(int argc,wchar_t** argv) {
             randomAccess(root/L"random.tar",true);
             std::cout<<"Testing direct stored ZIP random access"<<std::endl;
             randomAccess(root/L"random-stored.zip",true);
+            std::cout<<"Testing 64-bit sparse offsets and memory mapped I/O"<<std::endl;
+            fs::copy_file(root/L"ui.zip",root/L"large-offset.zip",fs::copy_options::overwrite_existing);
+            largeOffset(root/L"large-offset.zip");
+            mappedAccess(root/L"large-offset.zip");
             uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");
