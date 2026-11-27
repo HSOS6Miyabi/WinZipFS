@@ -116,7 +116,7 @@ class Dashboard {
             RowDefinition row;row.Height(GridLength{1,GridUnitType::Auto});grid.RowDefinitions().Append(row);
         }
         for(uint32_t i=0;i<grid.Children().Size();++i) {
-            auto child=grid.Children().GetAt(i);
+            auto child=grid.Children().GetAt(i).as<FrameworkElement>();
             Grid::SetRow(child,int(i)/columns);Grid::SetColumn(child,int(i)%columns);
         }
         heading.FontSize(narrow?24:32);

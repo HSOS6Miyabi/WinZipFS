@@ -429,13 +429,13 @@ void largeOffset(fs::path const& archive) {
     HANDLE file=CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
                             nullptr,CREATE_NEW,FILE_FLAG_WRITE_THROUGH,nullptr);
     require(file!=INVALID_HANDLE_VALUE,"create large logical file");
-    constexpr uint64_t far=5ull*1024*1024*1024+123;
-    LARGE_INTEGER position{};position.QuadPart=far;
+    constexpr uint64_t farOffset=5ull*1024*1024*1024+123;
+    LARGE_INTEGER position{};position.QuadPart=farOffset;
     require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)!=0,"seek past 4 GiB");
     char value='X';DWORD written=0;
     require(WriteFile(file,&value,1,&written,nullptr)&&written==1,"write above 4 GiB");
-    LARGE_INTEGER size{};require(GetFileSizeEx(file,&size)&&uint64_t(size.QuadPart)==far+1,"64-bit logical file size");
-    require(rangeRead(file,far-1,2)==std::string("\0X",2),"large sparse offset");
+    LARGE_INTEGER size{};require(GetFileSizeEx(file,&size)&&uint64_t(size.QuadPart)==farOffset+1,"64-bit logical file size");
+    require(rangeRead(file,farOffset-1,2)==std::string("\0X",2),"large sparse offset");
     position.QuadPart=64;require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)&&SetEndOfFile(file),"truncate large file");
     position.QuadPart=128;require(SetFilePointerEx(file,position,nullptr,FILE_BEGIN)&&SetEndOfFile(file),"extend truncated file");
     require(rangeRead(file,0,128)==std::string(128,'\0'),"truncate clears former data");
