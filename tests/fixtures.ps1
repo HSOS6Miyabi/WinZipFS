@@ -41,6 +41,31 @@ from zipfile import ZipFile
 import sys
 root = Path(sys.argv[1])
 from zipfile import ZIP_STORED, ZIP_DEFLATED
+import tarfile
+from io import RawIOBase
+MIB = 1024 * 1024
+class Pattern(RawIOBase):
+    def __init__(self):
+        self.offset = 0
+    def read(self, n=-1):
+        n = min(64*MIB-self.offset, n if n >= 0 else 64*MIB)
+        result = bytearray()
+        while n:
+            block = self.offset // MIB
+            take = min(n, MIB-self.offset%MIB)
+            result.extend(bytes([block%251])*take)
+            self.offset += take
+            n -= take
+        return bytes(result)
+with ZipFile(root / "random.zip", "w", compression=ZIP_DEFLATED) as z:
+    with z.open("large.bin", "w") as out:
+        source = Pattern()
+        while chunk := source.read(MIB):
+            out.write(chunk)
+with tarfile.open(root / "random.tar", "w") as tar:
+    info = tarfile.TarInfo("large.bin")
+    info.size = 64*MIB
+    tar.addfile(info, Pattern())
 with ZipFile(root / "incremental.zip", "w") as z:
     z.writestr("unchanged.bin", b"A" * 1048576, compress_type=ZIP_STORED)
     z.writestr("changed.txt", b"old" * 4096, compress_type=ZIP_DEFLATED)

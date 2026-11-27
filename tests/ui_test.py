@@ -315,6 +315,15 @@ def exit_application():
 
 def test_startup():
     verify_tray_icon()
+    value("MemoryMiB",64)
+    click("MemoryApply")
+    status_contains("Memory limit saved")
+    assert "Limit: 64 MiB" in ctl("MemoryStats").window_text()
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\WinZipFS") as key:
+        assert winreg.QueryValueEx(key,"MemoryMiB")[0]==64
+    value("MemoryMiB",512)
+    click("MemoryApply")
+    status_contains("Memory limit saved")
     for name in ("DashboardScroll", "Mount", "Hide", "Exit", "Status", "Summary", "Volumes", "Details",
                  "Open", "Flush", "Eject", "Batch", "Delay", "Idle", "Level", "Method", "Threads",
                  "Solid", "Apply", "LoadDefaults", "SaveDefaults", "Register", "Unregister",
@@ -571,6 +580,11 @@ def test_password():
 
 
 def test_recovery():
+    import uuid
+    cache = Path(os.environ["LOCALAPPDATA"]) / "WinZipFS" / "cache"
+    def cache_snapshot():
+        return {str(p): p.stat().st_size for p in cache.rglob("*") if p.is_file()}
+    initial_cache = cache_snapshot()
     root = launch_archive(FIX / "ui.zip")
     toggle("Batch")
     click("Apply")
@@ -580,7 +594,14 @@ def test_recovery():
     app.kill(soft=False)
     app.wait_for_process_exit(timeout=30)
     start_application()
-    status_contains("Recovered archive sessions")
+    assert cache_snapshot() == initial_cache
+    with ZipFile(FIX / "ui.zip") as archive:
+        assert "recovery-ui.txt" not in archive.namelist()
+    saved = cache / ("{" + str(uuid.uuid4()) + "}")
+    (saved / "files").mkdir(parents=True)
+    (saved / "archive.txt").write_text(str(FIX / "ui.zip"), encoding="utf-8")
+    (saved / "ready").write_text("1")
+    (saved / "files" / "recovery-ui.txt").write_text("recovered UI data", encoding="utf-8")
     click("Recovery")
     ctl("RecoveryList")
     modal_button("Save recovered copy…")

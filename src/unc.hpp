@@ -71,8 +71,7 @@ inline fs::path uncSourcePath(const fs::path& input) {
 class UncFs final : public Fsp::FileSystemBase {
     Ptfs shadow;
     Fsp::FileSystemHost host;
-    fs::path shadowPath,namespacePath;
-    std::unique_ptr<FileHandle> lease;
+
     std::vector<BYTE> user;
     DWORD session=0,level=0;
     bool started=false;
@@ -113,7 +112,7 @@ class UncFs final : public Fsp::FileSystemBase {
         constexpr std::wstring_view readonlyPrefix=L"\\ReadOnly";
         bool readOnly=prefixPath(name,readonlyPrefix);
         if(readOnly&&name.size()==readonlyPrefix.size()) {
-            fs::create_directories(shadowPath/name.substr(1));
+            shadow.ensureDirectory(name.substr(1));
             return {&shadow,name};
         }
         size_t driveOffset=readOnly?readonlyPrefix.size()+1:1;
@@ -123,7 +122,7 @@ class UncFs final : public Fsp::FileSystemBase {
         if(letter<L'A'||letter>L'Z'||!localDrive(letter)) throw std::runtime_error("Invalid local drive");
         fs::path source(std::wstring{letter,L':',L'\\'});
         if(name.size()==driveOffset+1) {
-            fs::create_directories(shadowPath/name.substr(1));
+            shadow.ensureDirectory(name.substr(1));
             return {&shadow,name};
         }
         for(size_t pos=driveOffset+2;pos<name.size();) {
@@ -144,7 +143,7 @@ class UncFs final : public Fsp::FileSystemBase {
         }
         // The namespace is not a general-purpose share of local disks. Only
         // virtual directory placeholders are exposed, never ordinary local files.
-        fs::create_directories(shadowPath/name.substr(1));
+        shadow.ensureDirectory(name.substr(1));
         return {&shadow,name};
     }
     template<class Fn> NTSTATUS named(PWSTR name,Fn&& callback) {
@@ -152,6 +151,8 @@ class UncFs final : public Fsp::FileSystemBase {
         std::lock_guard lock(manager);
         try {auto r=route(name);return callback(r);}
         catch(const PasswordRequired&) {return STATUS_ACCESS_DENIED;}
+        catch(const MemoryFull&) {return STATUS_DISK_FULL;}
+        catch(const std::bad_alloc&) {return STATUS_INSUFFICIENT_RESOURCES;}
         catch(...) {return STATUS_OBJECT_PATH_NOT_FOUND;}
     }
     NTSTATUS Init(PVOID value) override {
@@ -164,10 +165,8 @@ class UncFs final : public Fsp::FileSystemBase {
     }
     NTSTATUS GetVolumeInfo(VolumeInfo* info) override {
         auto result=shadow.GetVolumeInfo(info);
-        if(NT_SUCCESS(result)) {
-            ULARGE_INTEGER freeBytes{};
-            if(GetDiskFreeSpaceExW(shadowPath.c_str(),&freeBytes,nullptr,nullptr))info->FreeSize=freeBytes.QuadPart;
-        }
+        auto capacity=memoryPool.capacity(),used=memoryPool.used();
+        if(NT_SUCCESS(result))info->FreeSize=used>=capacity?0:capacity-used;
         return result;
     }
     NTSTATUS GetSecurityByName(PWSTR name,PUINT32 attr,PSECURITY_DESCRIPTOR sd,SIZE_T* size) override {
@@ -249,32 +248,16 @@ public:
             throw std::runtime_error("Cannot construct UNC namespace name");
         address=L"\\\\WinZipFS\\Archives-"+std::wstring(sid)+L"-"+std::to_wstring(session);
         LocalFree(sid);
-        namespacePath=local()/(L"namespace-"+guid());
-        shadowPath=namespacePath/L"files";
-        fs::create_directories(shadowPath);
-        try {
-            lease=lockCache(namespacePath);
-            if(!lease)throw std::runtime_error("Cannot lock UNC namespace directory");
-            shadow.readOnly=true;shadow.label=L"WinZipFS archives";
-            auto path=shadowPath.wstring();
-            if(!NT_SUCCESS(shadow.SetPath(path.data())))throw std::runtime_error("Cannot initialize UNC namespace");
-            wchar_t noMount[]={0};
-            NTSTATUS status=host.Mount(noMount);
-            if(!NT_SUCCESS(status))throw std::runtime_error("Cannot register UNC namespace (NTSTATUS "+std::to_string(static_cast<unsigned>(status))+")");
-            started=true;
-        }catch(...){lease.reset();removeCache(namespacePath);throw;}
+        shadow.readOnly=true;shadow.label=L"WinZipFS archives";
+        wchar_t noMount[]={0};
+        NTSTATUS status=host.Mount(noMount);
+        if(!NT_SUCCESS(status))throw std::runtime_error("Cannot register UNC namespace (NTSTATUS "+std::to_string(static_cast<unsigned>(status))+")");
+        started=true;
     }
-    ~UncFs() {if(started)host.Unmount();lease.reset();removeCache(namespacePath);}
+    ~UncFs() {if(started)host.Unmount();}
     void releasePath(std::wstring const& path) noexcept {
-        try {
-            if(!prefixPath(path,address)||path.size()<=address.size()+1)return;
-            auto item=shadowPath/path.substr(address.size()+1);
-            std::error_code ec;
-            while(item!=shadowPath && inside(item,shadowPath)) {
-                if(!fs::remove(item,ec)||ec)break;
-                item=item.parent_path();
-            }
-        }catch(...){}
+        if(prefixPath(path,address)&&path.size()>address.size()+1)
+            shadow.releaseDirectory(path.substr(address.size()+1));
     }
     std::wstring addressFor(fs::path const& source,bool readOnly=false) const {
         auto path=source.wstring();
@@ -295,7 +278,7 @@ public:
         auto opened=std::make_unique<Session>(source,options,readOnly,password,requested);
         opened->cacheSeconds=uncCacheSeconds;
         // Keep only directory names in the virtual namespace, never archive data.
-        fs::create_directories(shadowPath/requested.substr(address.size()+1));
+        shadow.ensureDirectory(requested.substr(address.size()+1));
         auto& result=*opened;sessions.push_back(std::move(opened));return result;
     }
 };

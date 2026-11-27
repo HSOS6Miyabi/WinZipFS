@@ -8,6 +8,9 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <map>
+#include <cstdlib>
+#include <array>
 namespace fs=std::filesystem;
 using namespace std::chrono_literals;
 void require(bool condition,const char* what) {
@@ -146,8 +149,20 @@ void password(fs::path const& archive) {
     eject(drive);
     require(read(archive)==before,"protected archive unchanged");
 }
+fs::path cachePath() {
+    auto value=_wgetenv(L"LOCALAPPDATA");
+    require(value!=nullptr,"local application data");
+    return fs::path(value)/L"WinZipFS"/L"cache";
+}
+std::map<std::wstring,uint64_t> cacheFiles() {
+    std::map<std::wstring,uint64_t> result;
+    auto path=cachePath();
+    if(fs::is_directory(path))for(auto const& entry:fs::recursive_directory_iterator(path))
+        if(entry.is_regular_file())result.emplace(entry.path().wstring(),entry.file_size());
+    return result;
+}
 void recovery(fs::path const& archive,const fs::path& output) {
-    // Create an orphan through a child process which exits without unmounting.
+    auto before=read(archive),cacheBefore=cacheFiles();
     wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
     std::wstring command=L"\""+std::wstring(exe)+L"\" --crash-fixture \""+archive.wstring()+L"\"";
     STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION child{};
@@ -156,18 +171,28 @@ void recovery(fs::path const& archive,const fs::path& output) {
     DWORD wait=WaitForSingleObject(child.hProcess,30000),code=1;
     GetExitCodeProcess(child.hProcess,&code);CloseHandle(child.hProcess);
     require(wait==WAIT_OBJECT_0&&code==0,"recovery fixture completed");
-    int n=wz_recovery_count();require(n>0,"abandoned session found");
+    require(read(archive)==before&&cacheFiles()==cacheBefore,"terminated RAM session never wrote archive or cache");
+    WzOptions o{};wz_default_options(&o);
+    auto drive=mount(archive,o);
+    require(!fs::exists(fs::path(drive+L"\\")/L"recovered.txt"),"uncommitted memory data not present after crash");
+    eject(drive);
+
+    // The recovery manager can still export a saved recovery directory.
+    auto saved=cachePath()/L"{e8415f0b-15a1-4765-bf8a-ae4f17469326}";
+    fs::create_directories(saved/L"files");
+    write(saved/L"archive.txt",archive.string()+"\n");
+    write(saved/L"ready","1");write(saved/L"files"/L"recovered.txt","saved recovery data");
+    int n=wz_recovery_count();require(n>0,"saved recovery found");
     WzRecovery found{};bool match=false;
     for(int i=0;i<n;++i) {
         WzRecovery item{};require(wz_recovery_get(i,&item)==1,"read recovery entry");
-        if(fs::path(item.archive)==fs::canonical(archive)) {found=item;match=true;break;}
+        if(fs::path(item.archive)==fs::canonical(archive)){found=item;match=true;break;}
     }
     require(match,"recovery manifest matches");
     require(wz_recovery_export(found.id,output.c_str())==1,"export recovery");
     require(wz_recovery_export(found.id,output.c_str())==0,"do not overwrite recovery");
-    WzOptions o{};wz_default_options(&o);
-    auto drive=mount(output,o);
-    require(read(fs::path(drive+L"\\")/L"recovered.txt")=="unsaved after termination","recovered data");
+    drive=mount(output,o);
+    require(read(fs::path(drive+L"\\")/L"recovered.txt")=="saved recovery data","recovered contents");
     eject(drive);
     require(wz_recovery_discard(found.id)==1,"discard exported recovery session");
     require(wz_recovery_discard(found.id)==0,"removed recovery unavailable");
@@ -277,6 +302,62 @@ void incremental(fs::path const& archive) {
     require(wz_recompress(drive.c_str())==1,"full recompression");
     require(std::wstring_view(volume(drive).status).find(L"recompressed")!=std::wstring_view::npos,"recompression status");
     eject(drive);
+}
+std::string rangeRead(HANDLE h,uint64_t offset,DWORD size) {
+    LARGE_INTEGER position{};position.QuadPart=static_cast<LONGLONG>(offset);
+    require(SetFilePointerEx(h,position,nullptr,FILE_BEGIN)!=0,"random seek");
+    std::string result(size,'\0');DWORD count=0;
+    require(ReadFile(h,result.data(),size,&count,nullptr)!=0&&count==size,"random range read");
+    return result;
+}
+void randomAccess(fs::path const& archive,bool direct) {
+    constexpr uint64_t MiB=1024ull*1024;
+    constexpr uint64_t length=64*MiB;
+    auto disk=cacheFiles();
+    require(wz_memory_limit(16)==1,"set bounded cache");
+    WzMemoryStats before{},after{};wz_memory_stats(&before);
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    require(fs::file_size(root/L"large.bin")==length,"logical large file size");
+    wz_memory_stats(&after);
+    require(after.decodedBytes==before.decodedBytes&&after.cleanBytes==before.cleanBytes,"mount and metadata only read index");
+    require(cacheFiles()==disk,"mount creates no disk cache");
+    HANDLE h=CreateFileW((root/L"large.bin").c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                         nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"open large archive item");
+    for(uint64_t offset:{length-8192,2*MiB+137,39*MiB+73,8*MiB+13,length-8192}) {
+        auto bytes=rangeRead(h,offset,4096);
+        for(size_t i=0;i<bytes.size();++i)require(static_cast<unsigned char>(bytes[i])==((offset+i)/MiB)%251,"random offset data");
+    }
+    wz_memory_stats(&after);
+    require(after.cleanBytes+after.dirtyBytes<=after.limitBytes,"memory limit respected");
+    if(direct)require(after.directReadBytes>before.directReadBytes,"seekable TAR direct stream");
+    LARGE_INTEGER offset{};offset.QuadPart=static_cast<LONGLONG>(31*MiB+99);
+    require(SetFilePointerEx(h,offset,nullptr,FILE_BEGIN)!=0,"random write seek");
+    DWORD written=0;const char edit[]="random edit";
+    require(WriteFile(h,edit,sizeof(edit)-1,&written,nullptr)!=0&&written==sizeof(edit)-1,"random write");
+    require(rangeRead(h,31*MiB+99,sizeof(edit)-1)==edit,"overlay read");
+    require(rangeRead(h,31*MiB+90,9)==std::string(9,char(31)),"partial write preserves previous bytes");
+    offset.QuadPart=static_cast<LONGLONG>(length+8*MiB);
+    require(SetFilePointerEx(h,offset,nullptr,FILE_BEGIN)!=0&&WriteFile(h,edit,sizeof(edit)-1,&written,nullptr)!=0,"sparse extension");
+    require(rangeRead(h,length+MiB,4096)==std::string(4096,'\0'),"sparse range zero");
+    CloseHandle(h);waitClosed(drive);
+    wz_memory_stats(&after);
+    require(after.dirtyBytes<=MiB&&after.cleanBytes+after.dirtyBytes<=after.limitBytes,"only edited pages allocated");
+    require(cacheFiles()==disk,"read and write create no disk cache");
+    require(wz_flush(drive.c_str())==1,"save memory overlay");
+    require(cacheFiles()==disk,"save creates no extracted cache");
+    eject(drive);
+    wz_memory_stats(&after);
+    require(after.cleanBytes==0&&after.dirtyBytes==0,"release all archive pages");
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    h=CreateFileW((root/L"large.bin").c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                 nullptr,OPEN_EXISTING,0,nullptr);
+    require(h!=INVALID_HANDLE_VALUE,"reopen modified archive");
+    require(rangeRead(h,31*MiB+99,sizeof(edit)-1)==edit,"saved random edit");
+    require(rangeRead(h,length+8*MiB,sizeof(edit)-1)==edit,"saved sparse extension");
+    CloseHandle(h);eject(drive);
+    require(wz_memory_limit(512)==1,"restore cache limit");
 }
 void uncMode(fs::path const& fixtures) {
     std::wcout<<L"Testing UNC on-demand namespace"<<std::endl;
@@ -392,6 +473,10 @@ int wmain(int argc,wchar_t** argv) {
             std::cout<<"Testing disk volume idle expiry"<<std::endl;
             idle(root/L"idle.zip");
             incremental(root/L"incremental.zip");
+            std::cout<<"Testing bounded random ZIP reads and writes"<<std::endl;
+            randomAccess(root/L"random.zip",false);
+            std::cout<<"Testing direct TAR random access"<<std::endl;
+            randomAccess(root/L"random.tar",true);
             uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");

@@ -3,7 +3,7 @@
 #include <bit7z/bitarchivereader.hpp>
 #include <bit7z/biterror.hpp>
 #include <bit7z/bitarchivewriter.hpp>
-#include <bit7z/bitarchiveeditor.hpp>
+#include <bit7z/bitabstractarchiveopener.hpp>
 #include <bcrypt.h>
 #include <array>
 #include <optional>
@@ -91,7 +91,7 @@ inline bool nonzero(const BitPropVariant& v) {
     if(v.isInt32()) return v.getInt32()!=0;
     return present(v);
 }
-inline bool archiveReadOnly(const BitArchiveReader& reader) {
+template<class Reader> inline bool archiveReadOnly(const Reader& reader) {
     if(nonzero(reader.archiveProperty(BitProperty::ErrorFlags)))
         throw std::runtime_error("The archive contains structural errors");
     return reader.isMultiVolume() || present(reader.archiveProperty(BitProperty::Comment)) ||
@@ -103,12 +103,12 @@ inline bool archiveReadOnly(const BitArchiveReader& reader) {
 struct PasswordRequired : std::runtime_error {
     PasswordRequired():std::runtime_error("A password is required or the password is incorrect") {}
 };
-inline bool validate(const BitArchiveReader& reader,const fs::path& root,bool allowEncrypted=false) {
+template<class Reader> inline bool validateArchive(const Reader& reader,bool allowEncrypted=false,bool standalone=false) {
     std::map<std::wstring,bool,CaseLess> names, prefixes;
     uint64_t total=0;
     bool metadataSensitive=false;
     if(reader.hasEncryptedItems()&&!allowEncrypted) throw PasswordRequired();
-    for(const auto& item:reader.items()) {
+    for(const auto& item:reader) {
         if(item.isSymLink() || (item.attributes() & FILE_ATTRIBUTE_REPARSE_POINT) ||
            present(reader.itemProperty(item.index(),BitProperty::HardLink)) ||
            present(reader.itemProperty(item.index(),BitProperty::NtReparse)) ||
@@ -117,6 +117,7 @@ inline bool validate(const BitArchiveReader& reader,const fs::path& root,bool al
             throw std::runtime_error("Archive contains links, alternate streams or special entries");
         if(present(reader.itemProperty(item.index(),BitProperty::Comment)) ||
            present(reader.itemProperty(item.index(),BitProperty::NtSecure))) metadataSensitive=true;
+        if(standalone&&item.rawPath().empty()) continue;
         auto name=safeName(item.rawPath(),item.isDir());
         if(name.empty()) continue;
         auto [it,ok]=names.emplace(name,item.isDir());
@@ -133,7 +134,6 @@ inline bool validate(const BitArchiveReader& reader,const fs::path& root,bool al
         if(auto i=prefixes.find(n);i!=prefixes.end() && (!isDir || i->first!=n))
             throw std::runtime_error("Archive contains conflicting file and directory names");
     }
-    if(total>fs::space(root).available) throw std::runtime_error("Insufficient cache disk space");
     return metadataSensitive;
 }
 inline void verifyTree(const fs::path& root) {
@@ -174,76 +174,10 @@ public:
     ~TemporaryFile() {std::error_code ec;fs::remove(path_,ec);}
     const fs::path& path() const {return path_;}
 };
-inline void extractStreamItem(const BitArchiveReader& outer,const fs::path& file) {
-    if(outer.itemsCount()!=1||outer.isItemFolder(0)||outer.hasEncryptedItems())
-        throw std::runtime_error("Invalid single-stream archive");
-    if(outer.itemProperty(0,BitProperty::Size).isUInt64() &&
-        outer.itemProperty(0,BitProperty::Size).getUInt64()>fs::space(file.parent_path()).available)
-        throw std::runtime_error("Insufficient disk space for decompressed stream");
-    std::ofstream output(file,std::ios::binary|std::ios::trunc);
-    if(!output) throw std::runtime_error("Cannot create decompressed file");
-    output.exceptions(std::ios::badbit|std::ios::failbit);
-    outer.extractTo(output,0);
-    output.close();
-}
 inline bool singleStream(const BitInFormat& format) {
     return format==BitFormat::GZip||format==BitFormat::BZip2||format==BitFormat::Xz||
            format==BitFormat::Zstd||format==BitFormat::Z||format==BitFormat::Lzma||
            format==BitFormat::Lzma86||format==BitFormat::Ppmd;
-}
-inline void extractStandalone(const BitArchiveReader& reader,const fs::path& source,const fs::path& root) {
-    if(reader.itemsCount()!=1||reader.isItemFolder(0))
-        throw std::runtime_error("Invalid single-stream archive");
-    auto item=reader.items().front();
-    if(item.isSymLink()||item.isEncrypted()) throw std::runtime_error("Unsupported single-stream entry");
-    auto name=item.rawPath();
-    if(name.empty()) name=source.stem().wstring();
-    name=safeName(name,false);
-    auto output=root/fs::path(name);
-    fs::create_directories(output.parent_path());
-    extractStreamItem(reader,output);
-    auto modified=reader.itemProperty(0,BitProperty::MTime);
-    if(modified.isFileTime()) {
-        HANDLE h=CreateFileW(output.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                             nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(h!=INVALID_HANDLE_VALUE) {
-            auto value=modified.getFileTime();
-            SetFileTime(h,nullptr,nullptr,&value);CloseHandle(h);
-        }
-    }
-}
-inline Format extract(const Bit7zLibrary& lib,const fs::path& source,const fs::path& root,const std::string& password={}) {
-    Format fmt;
-    try {
-        BitArchiveReader outer(lib,path8(source),BitFormat::Auto,password);
-        if(outer.hasEncryptedItems()&&password.empty()) throw PasswordRequired();
-        fmt=formatFor(source,outer.detectedFormat());
-        auto name=lower(source.filename().wstring());
-        bool zstdTar=(ends(name,L".tar.zst")||ends(name,L".tzst"))&&outer.detectedFormat()==BitFormat::Zstd;
-        if(fmt.outer||zstdTar) {
-            bool outerMetadata=archiveReadOnly(outer);
-            TemporaryFile tar(root.parent_path()/L"extracted.tar");
-            extractStreamItem(outer,tar.path());
-            BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
-            if(validate(inner,root)||archiveReadOnly(inner)||outerMetadata||zstdTar) fmt={};
-            if(inner.itemsCount()) inner.extractTo(path8(root));
-        } else if(singleStream(outer.detectedFormat())&&outer.itemsCount()==1) {
-            fmt={};
-            extractStandalone(outer,source,root);
-        } else {
-            if(validate(outer,root,!password.empty()) || archiveReadOnly(outer))
-                fmt={};
-            if(outer.itemsCount()) outer.extractTo(path8(root));
-        }
-    } catch(const BitException& e) {
-        if(e.code()==BitFailureSource::WrongPassword ||
-           (password.empty()&&BitArchiveReader::isHeaderEncrypted(lib,path8(source),BitFormat::Auto)))
-            throw PasswordRequired();
-        throw;
-    }
-    verifyTree(root);
-    if(!password.empty()||!isWritable(source)) fmt={};
-    return fmt;
 }
 inline void configure(BitArchiveWriter& writer,const BitInOutFormat& fmt,const WzOptions& o) {
     if(fmt.hasFeature(FormatFeatures::CompressionLevel))
@@ -260,195 +194,28 @@ inline void configure(BitArchiveWriter& writer,const BitInOutFormat& fmt,const W
         writer.setCompressionMethod(m);
     }
 }
-struct CacheEntry {
-    bool directory=false;
-    uint64_t size=0,created=0,modified=0;
-    DWORD attributes=0;
-    std::array<BYTE,32> digest{};
-    bool operator==(const CacheEntry&) const =default;
-};
-using CacheManifest=std::map<std::wstring,CacheEntry,CaseLess>;
 inline uint64_t timeValue(FILETIME t) {
     return (uint64_t(t.dwHighDateTime)<<32)|t.dwLowDateTime;
 }
-class CacheHasher {
-    BCRYPT_ALG_HANDLE algorithm=nullptr;
-    DWORD objectSize=0;
-    std::vector<BYTE> object,buffer;
-    static void check(NTSTATUS status) {
-        if(status<0)throw std::runtime_error("Cannot hash cached data");
-    }
-public:
-    CacheHasher() {
-        check(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0));
-        try {
-            DWORD returned=0;
-            check(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&objectSize),sizeof(objectSize),&returned,0));
-            object.resize(objectSize);buffer.resize(1024*1024);
-        }catch(...){BCryptCloseAlgorithmProvider(algorithm,0);throw;}
-    }
-    ~CacheHasher(){if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);}
-    CacheHasher(const CacheHasher&)=delete;
-    CacheHasher& operator=(const CacheHasher&)=delete;
-    std::array<BYTE,32> hash(HANDLE file) {
-        BCRYPT_HASH_HANDLE h=nullptr;
-        check(BCryptCreateHash(algorithm,&h,object.data(),objectSize,nullptr,0,0));
-        try {
-            DWORD count=0;
-            do {
-                if(!ReadFile(file,buffer.data(),static_cast<DWORD>(buffer.size()),&count,nullptr))
-                    throw std::runtime_error("Cannot read cached file for verification");
-                if(count) check(BCryptHashData(h,buffer.data(),count,0));
-            }while(count);
-            std::array<BYTE,32> result{};
-            check(BCryptFinishHash(h,result.data(),static_cast<ULONG>(result.size()),0));
-            BCryptDestroyHash(h);return result;
-        }catch(...){BCryptDestroyHash(h);throw;}
-    }
-};
-inline CacheManifest cacheManifest(const fs::path& root) {
-    verifyTree(root);
-    CacheManifest result;
-    CacheHasher hasher;
-    for(auto const& entry:fs::recursive_directory_iterator(root)) {
-        auto name=safeName(entry.path().lexically_relative(root).wstring(),entry.is_directory());
-        HANDLE h=CreateFileW(entry.path().c_str(),entry.is_directory()?FILE_READ_ATTRIBUTES:GENERIC_READ,
-            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
-        if(h==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot inspect cached file");
-        CacheEntry item;
-        try {
-            BY_HANDLE_FILE_INFORMATION info{};
-            if(!GetFileInformationByHandle(h,&info)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
-                throw std::runtime_error("Cannot inspect cached file attributes");
-            item.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
-            item.size=item.directory?0:(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
-            item.attributes=info.dwFileAttributes&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM|FILE_ATTRIBUTE_ARCHIVE);
-            item.created=timeValue(info.ftCreationTime);item.modified=timeValue(info.ftLastWriteTime);
-            if(!item.directory)item.digest=hasher.hash(h);
-            CloseHandle(h);
-        }catch(...){CloseHandle(h);throw;}
-        if(!result.emplace(std::move(name),item).second)throw std::runtime_error("Conflicting cached file names");
-    }
-    return result;
-}
+inline FILETIME fileTime(uint64_t t) {return {static_cast<DWORD>(t),static_cast<DWORD>(t>>32)};}
+inline uint64_t nowTime() {FILETIME t{};GetSystemTimeAsFileTime(&t);return timeValue(t);}
 inline bool incrementalFormat(Format format) {
     return !format.outer&&(format.inner==&BitFormat::Zip||format.inner==&BitFormat::SevenZip);
 }
 inline bool underPath(std::wstring_view name,std::wstring_view parent) {
-    return name.size()>=parent.size() &&
+    return parent.empty()|| (name.size()>=parent.size() &&
            CompareStringOrdinal(name.data(),static_cast<int>(parent.size()),parent.data(),static_cast<int>(parent.size()),TRUE)==CSTR_EQUAL &&
-           (name.size()==parent.size()||name[parent.size()]==L'\\');
+           (name.size()==parent.size()||name[parent.size()]==L'\\'));
 }
-inline void verifyManifest(const BitArchiveReader& reader,const fs::path& root) {
-    struct Entry { bool directory; uint64_t size; bool seen=false; };
-    std::map<std::wstring,Entry,CaseLess> expected;
-    for(const auto& file:fs::recursive_directory_iterator(root)) {
-        auto name=safeName(file.path().lexically_relative(root).wstring(),file.is_directory());
-        auto [it,inserted]=expected.emplace(name,Entry{file.is_directory(),file.is_directory()?0:file.file_size()});
-        if(!inserted) throw std::runtime_error("Conflicting cache names");
-    }
-    std::set<std::wstring,CaseLess> explicitNames;
-    for(const auto& item:reader.items()) {
-        auto name=safeName(item.rawPath(),item.isDir());
-        if(name.empty()) continue;
-        if(!explicitNames.insert(name).second) throw std::runtime_error("Duplicate entry in generated archive");
-        auto i=expected.find(name);
-        if(i==expected.end()||i->first!=name||i->second.directory!=item.isDir()||
-           (!item.isDir()&&i->second.size!=item.size()))
-            throw std::runtime_error("Generated archive does not match the cache: "+utf8(name));
-        i->second.seen=true;
-        for(size_t pos=name.find(L'\\');pos!=std::wstring::npos;pos=name.find(L'\\',pos+1)) {
-            auto parent=expected.find(name.substr(0,pos));
-            if(parent==expected.end()||!parent->second.directory)
-                throw std::runtime_error("Invalid generated directory path");
-            parent->second.seen=true;
-        }
-    }
-    for(const auto& [name,entry]:expected) if(!entry.seen)
-        throw std::runtime_error("Generated archive is missing "+utf8(name));
-}
-inline void packIncremental(const Bit7zLibrary& lib,const fs::path& original,const fs::path& root,
-                            const fs::path& output,Format fmt,const WzOptions& opt,
-                            const CacheManifest& previous,const CacheManifest& current) {
-    struct OldEntry {uint32_t index;bool directory;};
-    std::map<std::wstring,OldEntry,CaseLess> old;
-    {
-        BitArchiveReader reader(lib,path8(original),*fmt.inner);
-        for(const auto& item:reader.items()) {
-            auto name=safeName(item.rawPath(),item.isDir());
-            if(!name.empty())old.emplace(std::move(name),OldEntry{item.index(),item.isDir()});
-        }
-    }
-    // Add a complete subtree only when its directory did not have an explicit
-    // entry and must now be materialized (new/renamed directories or empty dirs).
-    std::vector<std::wstring> subtrees;
-    auto covered=[&](std::wstring_view name) {
-        return std::any_of(subtrees.begin(),subtrees.end(),[&](auto const& parent){return underPath(name,parent);});
-    };
-    for(auto const& [name,item]:current) {
-        if(!item.directory||covered(name))continue;
-        auto oldItem=old.find(name);
-        if(oldItem!=old.end()&&oldItem->first==name&&oldItem->second.directory)continue;
-        auto prior=previous.find(name);
-        auto next=current.upper_bound(name);
-        bool hasChildren=next!=current.end()&&underPath(next->first,name);
-        if(prior==previous.end()||prior->first!=name||prior->second!=item||!hasChildren)
-            subtrees.push_back(name);
-    }
-    {
-        BitArchiveEditor editor(lib,path8(original),*fmt.inner);
-        configure(editor,*fmt.inner,opt);
-        for(auto const& [name,entry]:old) {
-            auto now=current.find(name);
-            if(covered(name)||now==current.end()||now->first!=name||now->second.directory!=entry.directory) {
-                editor.deleteItem(entry.index,DeletePolicy::ItemOnly);
-                continue;
-            }
-            auto prior=previous.find(name);
-            if(prior==previous.end()||prior->first!=name||prior->second!=now->second)
-                editor.updateItem(entry.index,path8(root/fs::path(name)));
-        }
-        for(auto const& name:subtrees)
-            editor.addItems(std::vector<std::pair<tstring,tstring>>{{path8(root/fs::path(name)),utf8(name)}});
-        for(auto const& [name,item]:current) {
-            if(item.directory||covered(name))continue;
-            auto prior=old.find(name);
-            if(prior==old.end()||prior->first!=name||prior->second.directory)
-                editor.addFile(path8(root/fs::path(name)),utf8(name));
-        }
-        editor.compressTo(path8(output));
-    }
-    BitArchiveReader verified(lib,path8(output),*fmt.inner);
-    if(verified.itemsCount())verified.test();
-    verifyManifest(verified,root);
-}
-inline void pack(const Bit7zLibrary& lib,const fs::path& root,const fs::path& output,const fs::path& work,Format fmt,const WzOptions& opt) {
-    if(!fmt.inner) throw std::runtime_error("Read-only archive format");
+// Recovery of directories retained by older versions is an explicit export.
+inline void packRecovery(const Bit7zLibrary& lib,const fs::path& root,const fs::path& output,
+                         const BitInOutFormat& format,const WzOptions& options) {
     verifyTree(root);
-    auto target=fmt.outer?work:output;
-    {
-        BitArchiveWriter writer(lib,*fmt.inner);
-        configure(writer,*fmt.inner,opt);
-        if(!fs::is_empty(root)) writer.addDirectoryContents(path8(root));
-        writer.compressTo(path8(target));
-    }
-    if(fmt.outer) {
-        BitArchiveWriter writer(lib,*fmt.outer);
-        configure(writer,*fmt.outer,opt);
-        writer.addFile(path8(target),"archive.tar");
-        writer.compressTo(path8(output));
-    }
-    BitArchiveReader reader(lib,path8(output),fmt.outer?static_cast<const BitInFormat&>(*fmt.outer):*fmt.inner);
-    if(reader.itemsCount()) reader.test();
-    if(fmt.outer) {
-        TemporaryFile tar(work.parent_path()/L"verified.tar");
-        extractStreamItem(reader,tar.path());
-        BitArchiveReader inner(lib,path8(tar.path()),BitFormat::Tar);
-        if(inner.itemsCount()) inner.test();
-        verifyManifest(inner,root);
-    } else {
-        verifyManifest(reader,root);
-    }
+    BitArchiveWriter writer(lib,format);
+    configure(writer,format,options);
+    if(!fs::is_empty(root)) writer.addDirectoryContents(path8(root));
+    writer.compressTo(path8(output));
+    BitArchiveReader check(lib,path8(output),format);
+    if(check.itemsCount())check.test();
 }
 }

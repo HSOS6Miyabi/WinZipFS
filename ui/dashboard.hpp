@@ -56,7 +56,9 @@ class Dashboard {
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
            systemDefaultsBtn{nullptr},recoveryBtn{nullptr},hideBtn{nullptr},exitBtn{nullptr};
     Button uncBtn{nullptr},uncReadOnlyBtn{nullptr},copyUncBtn{nullptr},copyAddressBtn{nullptr},uncApplyBtn{nullptr},recompressBtn{nullptr};
-    TextBox uncRoot{nullptr},uncSeconds{nullptr},uncSessionSeconds{nullptr};
+    TextBox uncRoot{nullptr},uncSeconds{nullptr},uncSessionSeconds{nullptr},memoryMiB{nullptr};
+    TextBlock memoryStats{nullptr};
+    Button memoryApply{nullptr};
     ToggleSwitch preferUnc{nullptr};
     shell::UncSettings uncSettings=shell::loadUncSettings();
     bool uncAvailable=false;
@@ -144,6 +146,10 @@ class Dashboard {
         recompressBtn.IsEnabled(r&&!r->readOnly);discardBtn.IsEnabled(r&&!r->readOnly&&r->dirty);
     }
     void refresh() {
+        WzMemoryStats memory{};wz_memory_stats(&memory);
+        constexpr uint64_t mib=1024ull*1024;
+        memoryStats.Text(hs(L"Read cache: "+std::to_wstring(memory.cleanBytes/mib)+L" MiB · Unsaved pages: "+
+            std::to_wstring(memory.dirtyBytes/mib)+L" MiB · Limit: "+std::to_wstring(memory.limitBytes/mib)+L" MiB"));
         int n=wz_snapshot(nullptr,0);
         if(n<0)return;
         std::vector<WzVolume> updated(static_cast<size_t>(n));
@@ -229,7 +235,7 @@ class Dashboard {
             dialog.Title(box_value(L"Protected archive"));
             auto body=vertical(12);
             body.Children().Append(text(std::filesystem::path(path).filename().wstring(),16,true));
-            body.Children().Append(text(L"Enter the password to mount this archive read-only. Decrypted files are cached locally while mounted; the cache is removed on eject or the next startup after an unexpected exit."));
+            body.Children().Append(text(L"Enter the password to mount this archive read-only. File contents are decoded into memory only and released when the archive is closed."));
             auto password=identify(PasswordBox{},L"ArchivePassword");
             password.Header(box_value(L"Archive password"));
             body.Children().Append(password);
@@ -334,7 +340,7 @@ class Dashboard {
             dialog.XamlRoot(window.Content().as<FrameworkElement>().XamlRoot());
             dialog.Title(box_value(L"Recover archive files"));
             auto body=vertical(12);
-            body.Children().Append(text(L"These local files remain from a previous session. Save a new archive copy to recover the contents without replacing the original."));
+            body.Children().Append(text(L"Save a new archive copy from an existing recovery directory without replacing the original."));
             auto items=identify(ListView{},L"RecoveryList");
             items.SelectionMode(ListViewSelectionMode::Single);items.MaxHeight(300);items.MinHeight(100);
             for(const auto& entry:entries) items.Items().Append(box_value(hs(entry.archive)));
@@ -566,7 +572,7 @@ class Dashboard {
         settings.Children().Append(text(L"Compression and cache",20,true));
         settings.Children().Append(text(L"Apply settings to the selected archive, or save them as defaults for future mounts."));
         batch=toggle(L"Batch write mode",L"Batch");settings.Children().Append(batch);
-        settings.Children().Append(text(L"Batch mode keeps modifications in the local cache until Save changes or Eject."));
+        settings.Children().Append(text(L"Batch mode keeps modifications in memory until Save changes or Eject. Unexpected termination loses unsaved changes."));
         auto time=horizontal(12);
         delay=number(L"Writeback delay (seconds)",L"Delay");idle=number(L"Auto-eject (minutes, 0 = off)",L"Idle");
         uncSessionSeconds=number(L"UNC idle cache (seconds)",L"UncSessionSeconds");
@@ -583,6 +589,18 @@ class Dashboard {
         saveDefaultsBtn=button(L"Save as defaults",L"SaveDefaults");
         buttons.Children().Append(applyBtn);buttons.Children().Append(defaultsBtn);buttons.Children().Append(saveDefaultsBtn);
         settings.Children().Append(buttons);page.Children().Append(card(settings));
+        auto memoryPanel=vertical(10);
+        memoryPanel.Children().Append(text(L"Memory cache",20,true));
+        memoryPanel.Children().Append(text(L"Archives are indexed on open. File contents are read directly or decoded on demand. Pending edits stay in memory until saved; no extracted files are written to a cache directory."));
+        memoryStats=identify(text(L""),L"MemoryStats");
+        memoryPanel.Children().Append(memoryStats);
+        auto memoryActions=horizontal();
+        memoryMiB=number(L"Memory limit (MiB)",L"MemoryMiB");
+        memoryMiB.Text(hs(std::to_wstring(shell::loadMemoryLimit())));
+        memoryApply=button(L"Apply memory limit",L"MemoryApply");
+        memoryActions.Children().Append(memoryMiB);memoryActions.Children().Append(memoryApply);
+        memoryPanel.Children().Append(memoryActions);
+        page.Children().Append(card(memoryPanel));
         auto uncPanel=vertical(10);
         uncPanel.Children().Append(text(L"UNC access without drive letters",20,true));
         uncPanel.Children().Append(text(L"Open an archive by its UNC path from any Windows application while WinZipFS is running. Each archive cache is released after the last handle closes and its idle time expires."));
@@ -624,6 +642,13 @@ class Dashboard {
         uncReadOnlyBtn.Click([this](auto&&,auto&&){browse(true,true);});
         copyUncBtn.Click([this](auto&&,auto&&){copyUncPath();});
         uncApplyBtn.Click([this](auto&&,auto&&){applyUncSettings();});
+        memoryApply.Click([this](auto&&,auto&&){
+            try {
+                auto value=static_cast<unsigned>(checkedNumber(memoryMiB,16,65536));
+                if(!wz_memory_limit(value)){say(L"Error: "+coreError());return;}
+                shell::saveMemoryLimit(value);refresh();say(L"Memory limit saved.");
+            }catch(...){say(L"Error: Enter a memory limit from 16 to 65536 MiB.");}
+        });
         exportBtn.Click([this](auto&&,auto&&){exportCopy(selected);});
         discardBtn.Click([this](auto&&,auto&&){discard(selected);});
         recompressBtn.Click([this](auto&&,auto&&){recompress(selected);});
@@ -676,6 +701,7 @@ public:
             if(arg==L"--background")background=true;
         }
         window.Activate();if(background)hide();
+        wz_memory_limit(shell::loadMemoryLimit());
         wz_unc_start(&defaults,uncSettings.seconds);
         refreshUncControls();
         int recovered=wz_recovery_count();

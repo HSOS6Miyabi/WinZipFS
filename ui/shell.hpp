@@ -77,6 +77,21 @@ inline void saveDefaults(WzOptions o) {
     auto r=RegSetValueExW(h,L"Options",0,REG_BINARY,reinterpret_cast<const BYTE*>(&o),sizeof(o));RegCloseKey(h);
     if(r!=ERROR_SUCCESS) throw std::runtime_error("Cannot save settings");
 }
+inline unsigned loadMemoryLimit() {
+    DWORD value=0,size=sizeof(value);
+    if(RegGetValueW(HKEY_CURRENT_USER,registry,L"MemoryMiB",RRF_RT_REG_DWORD,nullptr,&value,&size)==ERROR_SUCCESS&&value>=16&&value<=65536)
+        return value;
+    return 512;
+}
+inline void saveMemoryLimit(unsigned megabytes) {
+    HKEY h{};
+    if(RegCreateKeyExW(HKEY_CURRENT_USER,registry,0,nullptr,0,KEY_SET_VALUE,nullptr,&h,nullptr)!=ERROR_SUCCESS)
+        throw std::runtime_error("Cannot save memory settings");
+    DWORD value=megabytes;
+    auto result=RegSetValueExW(h,L"MemoryMiB",0,REG_DWORD,reinterpret_cast<BYTE*>(&value),sizeof(value));
+    RegCloseKey(h);
+    if(result!=ERROR_SUCCESS)throw std::runtime_error("Cannot save memory settings");
+}
 struct UncSettings {unsigned seconds=30;bool prefer=false;};
 inline UncSettings loadUncSettings() {
     UncSettings value;

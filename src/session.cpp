@@ -15,7 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include "archive.hpp"
-#include "filesystem.hpp"
+#include "memory_writer.hpp"
 
 namespace wz {
 thread_local std::wstring error;
@@ -72,12 +72,6 @@ inline bool removeCache(const fs::path& root) noexcept {
         return !ec&&!fs::exists(root);
     } catch(...) {return false;}
 }
-inline void marker(const fs::path& path) {
-    std::ofstream out(path,std::ios::binary|std::ios::trunc);
-    out<<"1";
-    out.close();
-    if(!out) throw std::runtime_error("Cannot write session recovery metadata");
-}
 inline std::unique_ptr<FileHandle> lockCache(const fs::path& cache) {
     if(!ordinaryDirectory(cache)) return {};
     auto lock=std::make_unique<FileHandle>(CreateFileW((cache/L"session.lock").c_str(),
@@ -114,7 +108,7 @@ inline void checkOptions(const WzOptions& o) {
        (o.level!=0&&o.level!=1&&o.level!=3&&o.level!=5&&o.level!=7&&o.level!=9)||
        o.method<0||o.method>4||o.threads<0||o.threads>256) throw std::runtime_error("Invalid compression or cache settings");
 }
-inline void exportTree(const fs::path& root,const fs::path& destination,WzOptions options) {
+template<class Writer> inline void exportArchive(const fs::path& destination,WzOptions options,Writer&& write) {
     auto target=fs::absolute(destination);
     auto ext=lower(target.extension().wstring());
     Format copyFormat{ext==L".zip"?&BitFormat::Zip:ext==L".7z"?&BitFormat::SevenZip:nullptr};
@@ -124,7 +118,7 @@ inline void exportTree(const fs::path& root,const fs::path& destination,WzOption
     auto temp=target.parent_path()/(L".winzipfs-"+guid()+L".tmp"+target.extension().wstring());
     TemporaryFile cleanup(temp);
     options.method=0;
-    pack(lib(),root,temp,root.parent_path()/L"copy.tar",copyFormat,options);
+    write(temp,copyFormat,options);
     {
         FileHandle out(CreateFileW(temp.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
         if(out.value==INVALID_HANDLE_VALUE||!FlushFileBuffers(out.value))
@@ -134,43 +128,31 @@ inline void exportTree(const fs::path& root,const fs::path& destination,WzOption
         throw std::runtime_error("Cannot create the requested archive copy");
 }
 struct Session {
-    fs::path original, cache, root;
+    fs::path original;
+    std::wstring sessionId=guid();
     Fingerprint fingerprint;
     WzOptions options;
     Format format;
-    std::optional<CacheManifest> previous;
     bool forceRecompress=false;
     Ptfs ptfs;
     Fsp::FileSystemHost host;
     std::wstring drive,status=L"Ready";
     bool mounted=false,protectedArchive=false,uncMode=false;
-    std::unique_ptr<FileHandle> lease;
     unsigned cacheSeconds=30;
     unsigned long long retryAfter=0;
     std::wstring notifiedError;
     Session(const fs::path& p,const WzOptions& o,bool forceReadOnly,const wchar_t* password,std::wstring uncAddress={}):original(fs::canonical(p)),fingerprint(original),options(o),host(ptfs) {
         uncMode=!uncAddress.empty();
         checkOptions(o);
-        cache=local()/guid(); root=cache/L"files";
-        fs::create_directories(root);
         try {
-            lease=lockCache(cache);
-            if(!lease) throw std::runtime_error("Cannot lock the archive cache");
             Secret secret(password);
             protectedArchive=!secret.value.empty();
-            if(protectedArchive) marker(cache/L"sensitive");
-            std::ofstream manifest(cache/L"archive.txt",std::ios::binary);
-            manifest<<path8(original)<<"\n"; manifest.close();
-            if(!manifest) throw std::runtime_error("Cannot write session metadata");
-            format=extract(lib(),original,root,secret.value);
-            if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed while opening");
-            if(forceReadOnly) format={};
+            auto opened=openArchive(lib(),original,secret.value,forceReadOnly);
+            format=opened.format;
             ptfs.readOnly=!format.inner;
-            if(incrementalFormat(format)) previous=cacheManifest(root);
             ptfs.label=original.filename().wstring();
-            marker(cache/L"ready");
-            auto s=root.wstring();
-            if(!NT_SUCCESS(ptfs.SetPath(s.data()))) throw std::runtime_error("Cannot open cache directory");
+            ptfs.load(std::move(opened.source),original,opened.standalone);
+            if(!(fingerprint==Fingerprint(original))) throw std::runtime_error("Original archive changed while opening");
             if(uncMode) drive=std::move(uncAddress);
             else {
                 DWORD used=GetLogicalDrives();
@@ -185,14 +167,12 @@ struct Session {
             if(ptfs.readOnly) status=protectedArchive?L"Read-only · protected":L"Read-only";
         } catch(...) {
             if(mounted) host.Unmount();
-            lease.reset();
-            removeCache(cache);throw;
+            throw;
         }
     }
     ~Session() {
         if(mounted) host.Unmount();
-        lease.reset();
-        if(!ptfs.dirty) { removeCache(cache); }
+
     }
     void commitFrozen() {
         if(!ptfs.dirty) return;
@@ -202,18 +182,14 @@ struct Session {
         if(source.value==INVALID_HANDLE_VALUE)
             throw std::runtime_error("The original archive is open for writing or unavailable. Close the other application and retry.");
         if(!(fingerprint==Fingerprint(source.value)) || !(fingerprint==Fingerprint(original)))
-            throw std::runtime_error("Original archive changed; cache retained for recovery");
+            throw std::runtime_error("Original archive changed; unsaved memory data retained");
         auto tmp=original.parent_path()/(L".winzipfs-"+guid()+L".tmp"+original.extension().wstring());
         auto backup=original.parent_path()/(L".winzipfs-"+guid()+L".bak");
-        auto work=cache/L"repack.tar";
         bool replacing=false;
         try {
-            std::error_code ec;fs::remove(work,ec);
-            std::optional<CacheManifest> current;
-            if(previous)current=cacheManifest(root);
-            bool incremental=previous.has_value()&&!forceRecompress;
-            if(incremental)packIncremental(lib(),original,root,tmp,format,options,*previous,*current);
-            else pack(lib(),root,tmp,work,format,options);
+            std::error_code ec;
+            bool incremental=incrementalFormat(format)&&!forceRecompress;
+            packMemory(lib(),ptfs,tmp,format,options,incremental?&original:nullptr);
             HANDLE out=CreateFileW(tmp.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
             if(out==INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot flush new archive");
             BOOL flushed=FlushFileBuffers(out);CloseHandle(out);
@@ -225,24 +201,28 @@ struct Session {
                 if(GetFileAttributesW(original.c_str())==INVALID_FILE_ATTRIBUTES &&
                    GetFileAttributesW(backup.c_str())!=INVALID_FILE_ATTRIBUTES)
                     MoveFileExW(backup.c_str(),original.c_str(),MOVEFILE_WRITE_THROUGH);
-                throw std::runtime_error("Cannot replace original archive (Windows error "+std::to_string(code)+"); cache retained; replacement: "+path8(tmp)+"; backup: "+path8(backup));
+                throw std::runtime_error("Cannot replace original archive (Windows error "+std::to_string(code)+"); unsaved memory data retained; replacement: "+path8(tmp)+"; backup: "+path8(backup));
             }
             if(!(fingerprint==Fingerprint(backup))) {
                 auto packed=original.parent_path()/(L".winzipfs-"+guid()+L".recovered"+original.extension().wstring());
                 ReplaceFileW(original.c_str(),backup.c_str(),packed.c_str(),0,nullptr,nullptr);
-                throw std::runtime_error("Original archive was replaced concurrently; cached files and replacement backups retained");
+                throw std::runtime_error("Original archive was replaced concurrently; unsaved memory data and replacement backups retained");
             }
             fingerprint=Fingerprint(original);
-            if(current)previous=std::move(current);
+            // Reopen the committed archive and rebind item indices. No
+            // extracted file or pending modification is written to a cache directory.
+            forceRecompress=true;
+            auto opened=openArchive(lib(),original);
+            if(!opened.format.inner)throw std::runtime_error("Saved archive could not be reopened for writing");
+            ptfs.load(std::move(opened.source),original,opened.standalone);
+            format=opened.format;
             forceRecompress=false;
-            ptfs.dirty=false;
             fs::remove(backup,ec);
-            fs::remove(work,ec);
             status=incremental?L"Saved · incremental":L"Saved · recompressed";
         } catch(...) {
             std::error_code ec;
             if(!replacing) fs::remove(tmp,ec);
-            fs::remove(work,ec);throw;
+            throw;
         }
     }
     bool idle(unsigned long long now,unsigned long long delay) const {
@@ -258,7 +238,9 @@ struct Session {
         if(protectedArchive) throw std::runtime_error("A protected archive cannot be exported without encryption");
         freeze();
         try {
-            exportTree(root,destination,options);
+            exportArchive(destination,options,[this](auto const& temp,Format fmt,WzOptions const& o){
+                packMemory(lib(),ptfs,temp,fmt,o);
+            });
             ptfs.Touch();ptfs.closing=false;
         } catch(...) {ptfs.closing=false;ptfs.Touch();throw;}
     }
@@ -309,7 +291,7 @@ inline bool inside(const fs::path& path,const fs::path& parent) {
 inline void independentPath(const fs::path& p) {
     if(lower(p.wstring()).starts_with(L"\\\\winzipfs\\")) throw std::runtime_error("Choose a path outside the WinZipFS UNC namespace");
     for(const auto& session:sessions) {
-        if((!session->uncMode&&same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring()))||inside(p,session->cache))
+        if((!session->uncMode&&same(p.root_name().wstring(),fs::path(session->drive).root_name().wstring())) )
             throw std::runtime_error("Choose a path outside mounted archive drives and their caches");
     }
     if(inside(p,local())) throw std::runtime_error("Choose a path outside the recovery cache");
@@ -428,7 +410,9 @@ int wz_recovery_export(const wchar_t* id,const wchar_t* destination) {
         auto target=wz::fs::absolute(destination);auto parent=wz::fs::canonical(target.parent_path());
         wz::independentPath(target);wz::independentPath(parent);
         WzOptions o{};wz_default_options(&o);
-        wz::exportTree(path/L"files",parent/target.filename(),o);
+        wz::exportArchive(parent/target.filename(),o,[&](auto const& temp,wz::Format fmt,WzOptions const& opt){
+            wz::packRecovery(wz::lib(),path/L"files",temp,*fmt.inner,opt);
+        });
     });
 }
 int wz_recovery_discard(const wchar_t* id) {
@@ -518,7 +502,7 @@ static void fillVolume(wz::Session& s,WzVolume* out) {
     wz::copy(out->status,512,s.status);
     out->readOnly=s.ptfs.readOnly;out->dirty=s.ptfs.dirty;out->protectedArchive=s.protectedArchive;
     out->handles=s.ptfs.handles;out->options=s.options;
-    wz::copy(out->sessionId,64,s.cache.filename().wstring());
+    wz::copy(out->sessionId,64,s.sessionId);
 }
 int wz_get(int i,WzVolume* out) {
     return wz::call([&]{
@@ -604,6 +588,12 @@ int wz_shutdown() {
     closing.reset(); // Stop network callbacks outside the session mutex.
     {std::lock_guard lock(wz::manager);wz::uncStopping=false;}
     return result;
+}
+int wz_memory_limit(unsigned megabytes) {return wz::call([&]{wz::memoryPool.setLimit(uint64_t(megabytes)*wz::MiB);});}
+void wz_memory_stats(WzMemoryStats* out) {
+    if(!out)return;
+    *out={wz::memoryPool.capacity(),wz::cleanBytes.load(),wz::dirtyBytes.load(),
+          wz::directReadBytes.load(),wz::decodedBytes.load(),wz::decodeCalls.load()};
 }
 void wz_error(wchar_t* out,unsigned size) {wz::copy(out,size,wz::error);}
 }

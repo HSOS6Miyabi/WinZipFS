@@ -52,6 +52,11 @@ WZ_API int wz_recompress(const wchar_t* mount);
 WZ_API int wz_eject(const wchar_t* mount);
 WZ_API int wz_tick(void);
 WZ_API int wz_shutdown(void);
+typedef struct WzMemoryStats {
+    uint64_t limitBytes, cleanBytes, dirtyBytes, directReadBytes, decodedBytes, decodeCalls;
+} WzMemoryStats;
+WZ_API int wz_memory_limit(unsigned megabytes);
+WZ_API void wz_memory_stats(WzMemoryStats* info);
 WZ_API void wz_error(wchar_t* buffer, unsigned size);
 WZ_API void wz_default_options(WzOptions* options);
 WZ_API const wchar_t* wz_extensions(void);
