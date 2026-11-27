@@ -178,7 +178,7 @@ public:
         auto const& reader=source->reader();
         for(auto const& item:reader) {
             auto raw=item.rawPath();
-            if(standalone&&raw.empty())raw=archive.stem().wstring();
+            if(standalone)raw=source->standaloneName().empty()?archive.stem().wstring():source->standaloneName();
             auto name=safeName(raw,item.isDir());
             if(name.empty())continue;
             ensureParents(next,name);

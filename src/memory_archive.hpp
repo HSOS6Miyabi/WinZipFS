@@ -255,6 +255,7 @@ class ArchiveSource : public std::enable_shared_from_this<ArchiveSource> {
     std::map<uint32_t,uint64_t> sizes;
     std::set<uint32_t> sequentialOnly;
     bool protected_=false;
+    std::wstring standaloneName_;
     static void readExact(IInStream* stream,uint64_t offset,void* out,size_t count) {
         UInt64 position=0;
         if(stream->Seek(static_cast<Int64>(offset),STREAM_SEEK_SET,&position)!=S_OK||position!=offset)
@@ -320,6 +321,7 @@ public:
     ArchiveSource()=default;
     ~ArchiveSource(){memoryPool.drop(id);}
     SeekableReader const& reader() const {return *reader_;}
+    std::wstring const& standaloneName() const noexcept {return standaloneName_;}
     void verify() const {
         if(file)file->verify();
         if(parent)parent->verify();
@@ -367,6 +369,8 @@ public:
         if(!format) {
             BitArchiveReader probe(lib,path8(path),BitFormat::Auto,password);
             format=&probe.detectedFormat();multi=probe.isMultiVolume();
+            if(singleStream(*format)&&probe.itemsCount()==1)
+                source->standaloneName_=probe.itemAt(0).rawPath();
             if(probe.hasEncryptedItems()&&password.empty())throw PasswordRequired();
         }
         source->file=std::make_shared<DiskInput>(path);

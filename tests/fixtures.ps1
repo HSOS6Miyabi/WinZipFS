@@ -62,6 +62,11 @@ with ZipFile(root / "random.zip", "w", compression=ZIP_DEFLATED) as z:
         source = Pattern()
         while chunk := source.read(MIB):
             out.write(chunk)
+with ZipFile(root / "random-stored.zip", "w", compression=ZIP_STORED) as z:
+    with z.open("large.bin", "w") as out:
+        source = Pattern()
+        while chunk := source.read(MIB):
+            out.write(chunk)
 with tarfile.open(root / "random.tar", "w") as tar:
     info = tarfile.TarInfo("large.bin")
     info.size = 64*MIB

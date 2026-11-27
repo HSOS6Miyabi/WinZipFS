@@ -2,6 +2,7 @@
 // Included by memory_archive.hpp after DiskInput and the bounded memory pool.
 #include <zip.h>
 #include <zlib.h>
+#include <cerrno>
 
 namespace wz {
 class ZipAccess {
@@ -84,7 +85,10 @@ class ZipAccess {
     static constexpr uint64_t CheckpointInterval=4*MiB;
     static constexpr size_t MaximumPoints=4096;
     void savePoint(uint32_t item,Entry& entry,z_stream& z,uint64_t logical,uint64_t compressed,uint32_t crc) {
-        if(entry.points.contains(logical))return;
+        if(entry.points.contains(logical)) {
+            if(memoryPool.lookup(CacheKey{checkpointId,item,logical}))return;
+            entry.points.erase(logical);
+        }
         Checkpoint point{};
         point.logical=logical;point.compressed=compressed;point.crc=crc;
         point.bits=static_cast<unsigned>(z.data_type)&7;
@@ -225,7 +229,7 @@ public:
             if(boundary&&out>0&&out-lastPoint>=CheckpointInterval) {
                 savePoint(index,e,z,out,in-z.avail_in,crc);lastPoint=out;
             }
-            if(!produced&&before==z.avail_in&&!boundary)
+            if(!produced&&before==z.avail_in&&!(z.data_type&128))
                 throw std::runtime_error("DEFLATE decoder made no progress");
         }
         if(copied!=page.data.size())throw std::runtime_error("Short DEFLATE output");

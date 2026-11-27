@@ -327,12 +327,17 @@ void randomAccess(fs::path const& archive,bool direct) {
                          nullptr,OPEN_EXISTING,0,nullptr);
     require(h!=INVALID_HANDLE_VALUE,"open large archive item");
     for(uint64_t offset:{length-8192,2*MiB+137,39*MiB+73,8*MiB+13,length-8192}) {
+        WzMemoryStats previous{};wz_memory_stats(&previous);
         auto bytes=rangeRead(h,offset,4096);
+        if(!direct&&offset==39*MiB+73) {
+            WzMemoryStats current{};wz_memory_stats(&current);
+            require(current.decodedBytes-previous.decodedBytes<20*MiB,"DEFLATE random read resumes from indexed block");
+        }
         for(size_t i=0;i<bytes.size();++i)require(static_cast<unsigned char>(bytes[i])==((offset+i)/MiB)%251,"random offset data");
     }
     wz_memory_stats(&after);
     require(after.cleanBytes+after.dirtyBytes<=after.limitBytes,"memory limit respected");
-    if(direct)require(after.directReadBytes>before.directReadBytes,"seekable TAR direct stream");
+    if(direct)require(after.directReadBytes>before.directReadBytes&&after.decodedBytes==before.decodedBytes,"direct stream does not decompress payload");
     LARGE_INTEGER offset{};offset.QuadPart=static_cast<LONGLONG>(31*MiB+99);
     require(SetFilePointerEx(h,offset,nullptr,FILE_BEGIN)!=0,"random write seek");
     DWORD written=0;const char edit[]="random edit";
@@ -375,6 +380,15 @@ void uncMode(fs::path const& fixtures) {
     wchar_t explicitRo[WZ_MOUNT_CAPACITY]{};
     require(wz_unc_path_readonly(first.c_str(),explicitRo,WZ_MOUNT_CAPACITY)==1,"generate explicit readonly address");
     require(wz_count()==0&&GetLogicalDrives()==drives,"no eager archive session or drive letter");
+    auto disk=cacheFiles();
+    wchar_t large[WZ_MOUNT_CAPACITY]{};
+    require(wz_unc_path((fixtures/L"random.zip").c_str(),large,WZ_MOUNT_CAPACITY)==1,"large ZIP UNC path");
+    HANDLE largeFile=CreateFileW((fs::path(large)/L"large.bin").c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+    require(largeFile!=INVALID_HANDLE_VALUE,"open large UNC archive item");
+    require(rangeRead(largeFile,39ull*1024*1024+73,4096)==std::string(4096,char(39)),"UNC random offset data");
+    CloseHandle(largeFile);waitClosed(large);
+    require(cacheFiles()==disk,"UNC random access creates no disk cache");
+    require(wz_eject(large)==1&&wz_count()==0,"close large UNC archive");
     require(std::wstring_view(a).starts_with(L"\\\\WinZipFS\\"),"UNC address");
     auto aa=fs::path(a),bb=fs::path(b);
     require(read(aa/L"sample.txt")=="original","direct UNC read creates a session");
@@ -478,6 +492,8 @@ int wmain(int argc,wchar_t** argv) {
             randomAccess(root/L"random.zip",false);
             std::cout<<"Testing direct TAR random access"<<std::endl;
             randomAccess(root/L"random.tar",true);
+            std::cout<<"Testing direct stored ZIP random access"<<std::endl;
+            randomAccess(root/L"random-stored.zip",true);
             uncMode(root);
         }
         require(wz_shutdown()==1,"shutdown");
