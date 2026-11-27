@@ -15,6 +15,10 @@ struct MemoryNode {
     uint64_t id=nodeIds.fetch_add(1),size=0,baseLimit=0,allocation=0;
     uint64_t created=nowTime(),accessed=created,modified=created,changed=created;
     DWORD attributes=0;
+    std::optional<uint32_t> posixMode;
+    uint32_t uid=0,gid=0;
+    std::string user,group;
+    bool hasAccessTime=false,hasCreationTime=false;
     std::optional<uint32_t> sourceIndex;
     bool dataDirty=false,propertiesDirty=false;
     std::map<uint64_t,PagePtr> pages;
@@ -138,6 +142,15 @@ class MemoryFs final : public Fsp::FileSystemBase {
         auto desc=std::make_unique<MemoryFileDesc>(node,this);
         info(*node,&out->FileInfo);*pNode=node.get();*pDesc=desc.release();++handles;Touch();
     }
+    static void setAttributes(MemoryNode& node,DWORD attributes) {
+        bool wasReadOnly=(node.attributes&FILE_ATTRIBUTE_READONLY)!=0;
+        bool isReadOnly=(attributes&FILE_ATTRIBUTE_READONLY)!=0;
+        if(node.posixMode&&wasReadOnly!=isReadOnly) {
+            if(isReadOnly)*node.posixMode&=~0222u;
+            else *node.posixMode|=0200u;
+        }
+        node.attributes=attributes&basicAttributes;
+    }
     void changed(MemoryNode& node,bool content) {
         node.changed=nowTime();
         if(content){node.modified=node.changed;node.dataDirty=true;node.attributes|=FILE_ATTRIBUTE_ARCHIVE;}
@@ -184,7 +197,27 @@ public:
             ensureParents(next,name);
             auto node=std::make_shared<MemoryNode>();
             node->name=name;node->directory=item.isDir();
-            node->attributes=item.attributes()&basicAttributes;
+            auto archiveAttributes=item.attributes();
+            node->attributes=archiveAttributes&basicAttributes;
+            auto posix=reader.itemProperty(item.index(),BitProperty::PosixAttrib);
+            if(posix.isUInt32())node->posixMode=posix.getUInt32();
+            else if(archiveAttributes&0x8000)node->posixMode=archiveAttributes>>16;
+            if(node->posixMode&&!(node->posixMode.value()&0222)&&!node->directory)
+                node->attributes|=FILE_ATTRIBUTE_READONLY;
+            if(reader.detectedFormat()==BitFormat::Tar) {
+                auto numeric=[&](BitProperty prop) {
+                    auto v=reader.itemProperty(item.index(),prop);return v.isUInt32()?v.getUInt32():0u;
+                };
+                // Additional property identifiers follow the published 7-Zip SDK.
+                node->uid=numeric(static_cast<BitProperty>(kpidUserId));
+                node->gid=numeric(static_cast<BitProperty>(kpidGroupId));
+                auto user=reader.itemProperty(item.index(),BitProperty::User);
+                auto group=reader.itemProperty(item.index(),BitProperty::Group);
+                if(user.isString())node->user=user.getString();
+                if(group.isString())node->group=group.getString();
+            }
+            node->hasCreationTime=reader.itemProperty(item.index(),BitProperty::CTime).isFileTime();
+            node->hasAccessTime=reader.itemProperty(item.index(),BitProperty::ATime).isFileTime();
             node->created=propertyTime(reader,item.index(),BitProperty::CTime,creation);
             node->modified=propertyTime(reader,item.index(),BitProperty::MTime,node->created);
             node->accessed=propertyTime(reader,item.index(),BitProperty::ATime,node->modified);
@@ -326,7 +359,7 @@ public:
         if(attributes&unsupportedAttributes||allocation>uint64_t(INT64_MAX)-4096)return STATUS_INVALID_PARAMETER;
         if(n.attributes&FILE_ATTRIBUTE_READONLY)return STATUS_ACCESS_DENIED;
         resize(n,0);n.allocation=alignedSize(allocation);
-        n.attributes=(replace?0:n.attributes)|(attributes&basicAttributes);
+        setAttributes(n,(replace?0:n.attributes)|(attributes&basicAttributes));
         changed(n,true);info(n,out);return STATUS_SUCCESS;
     }
     VOID Cleanup(PVOID,PVOID desc,PWSTR,ULONG flags) override {
@@ -405,8 +438,8 @@ public:
         if(readOnly)return STATUS_MEDIA_WRITE_PROTECTED;
         if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&unsupportedAttributes))return STATUS_NOT_SUPPORTED;
         auto& n=*descriptor(desc).node;
-        if(attributes!=INVALID_FILE_ATTRIBUTES)n.attributes=attributes&basicAttributes;
-        if(c)n.created=c;if(a)n.accessed=a;if(w)n.modified=w;
+        if(attributes!=INVALID_FILE_ATTRIBUTES)setAttributes(n,attributes);
+        if(c){n.created=c;n.hasCreationTime=true;}if(a){n.accessed=a;n.hasAccessTime=true;}if(w)n.modified=w;
         n.changed=x?x:nowTime();n.propertiesDirty=true;Changed();info(n,out);return STATUS_SUCCESS;
     }
     NTSTATUS SetFileSize(PVOID,PVOID desc,UINT64 size,BOOLEAN allocation,FileInfo* out) override {

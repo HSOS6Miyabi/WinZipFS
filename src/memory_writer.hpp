@@ -89,7 +89,8 @@ protected:
         case BitProperty::IsDir:return BitPropVariant(n.directory);
         case BitProperty::Size:return BitPropVariant(n.directory?uint64_t(0):n.size);
         case BitProperty::Attrib:return BitPropVariant(static_cast<uint32_t>(
-            n.attributes|(n.directory?FILE_ATTRIBUTE_DIRECTORY:0)));
+            n.attributes|(n.directory?FILE_ATTRIBUTE_DIRECTORY:0)|
+            (n.posixMode?((*n.posixMode&0xffffu)<<16)|0x8000u:0u)));
         case BitProperty::CTime:return BitPropVariant(fileTime(n.created));
         case BitProperty::ATime:return BitPropVariant(fileTime(n.accessed));
         case BitProperty::MTime:return BitPropVariant(fileTime(n.modified));
@@ -143,12 +144,16 @@ class TarLayout {
             field[0]|=0x80;
         }
     }
-    static std::vector<unsigned char> header(std::string const& name,uint64_t size,char type,uint64_t time,DWORD attrs) {
+    static std::vector<unsigned char> header(std::string const& name,uint64_t size,char type,uint64_t time,
+                                              uint32_t mode,uint32_t uid=0,uint32_t gid=0,
+                                              std::string_view user={},std::string_view group={}) {
         if(name.size()>100)throw std::runtime_error("Invalid TAR header name");
         std::vector<unsigned char> h(512,0);
         memcpy(h.data(),name.data(),name.size());
-        number(h.data()+100,8,type=='5'?0755:(attrs&FILE_ATTRIBUTE_READONLY)?0444:0644);
-        number(h.data()+108,8,0);number(h.data()+116,8,0);number(h.data()+124,12,size);
+        number(h.data()+100,8,mode&07777u);
+        number(h.data()+108,8,uid);number(h.data()+116,8,gid);number(h.data()+124,12,size);
+        if(!user.empty()&&user.size()<=32)memcpy(h.data()+265,user.data(),user.size());
+        if(!group.empty()&&group.size()<=32)memcpy(h.data()+297,group.data(),group.size());
         constexpr uint64_t epoch=116444736000000000ull;
         number(h.data()+136,12,time>epoch?(time-epoch)/10000000:0);
         memset(h.data()+148,' ',8);h[156]=static_cast<unsigned char>(type);
@@ -168,11 +173,22 @@ class TarLayout {
     }
     void zeros(uint64_t n){append({0,n,{},{}});}
     void padding(uint64_t n){zeros((512-(n%512))%512);}
-    static std::string paxPath(std::string const& path) {
-        auto body=std::string(" path=")+path+"\n";
+    static std::string paxRecord(std::string_view key,std::string const& value) {
+        auto body=std::string(" ")+std::string(key)+"="+value+"\n";
         size_t n=body.size()+1;
         for(;;){auto next=body.size()+std::to_string(n).size();if(next==n)break;n=next;}
         return std::to_string(n)+body;
+    }
+    static std::string unixTime(uint64_t time) {
+        constexpr uint64_t epoch=116444736000000000ull;
+        bool negative=time<epoch;
+        uint64_t delta=negative?epoch-time:time-epoch;
+        auto result=(negative?std::string("-"):std::string{})+std::to_string(delta/10000000);
+        if(auto fraction=delta%10000000) {
+            auto digits=std::to_string(fraction);
+            result+="."+std::string(7-digits.size(),'0')+digits;
+        }
+        return result;
     }
 public:
     explicit TarLayout(MemoryFs const& fs):fs_(fs) {
@@ -182,15 +198,26 @@ public:
             auto path=utf8(name);std::replace(path.begin(),path.end(),'\\','/');
             if(node->directory)path+='/';
             auto fallback=path;
+            std::string pax;
             if(path.size()>100) {
-                auto pax=paxPath(path);
+                pax+=paxRecord("path",path);
+                fallback="Entry/"+std::to_string(id+1);
+            }
+            if(node->user.size()>32)pax+=paxRecord("uname",node->user);
+            if(node->group.size()>32)pax+=paxRecord("gname",node->group);
+            constexpr uint64_t epoch=116444736000000000ull;
+            if(node->modified<epoch||(node->modified-epoch)%10000000)
+                pax+=paxRecord("mtime",unixTime(node->modified));
+            if(node->hasAccessTime)pax+=paxRecord("atime",unixTime(node->accessed));
+            if(node->hasCreationTime)pax+=paxRecord("ctime",unixTime(node->created));
+            if(!pax.empty()) {
                 auto tag="PaxHeaders/"+std::to_string(++id);
-                bytes(header(tag,pax.size(),'x',node->modified,0));
+                bytes(header(tag,pax.size(),'x',node->modified,0644));
                 bytes(std::vector<unsigned char>(pax.begin(),pax.end()));padding(pax.size());
-                fallback="Entry/"+std::to_string(id);
             }
             auto length=node->directory?0:node->size;
-            bytes(header(fallback,length,node->directory?'5':'0',node->modified,node->attributes));
+            uint32_t mode=node->posixMode.value_or(node->directory?0755u:(node->attributes&FILE_ATTRIBUTE_READONLY)?0444u:0644u);
+            bytes(header(fallback,length,node->directory?'5':'0',node->modified,mode,node->uid,node->gid,node->user,node->group));
             if(length)append({0,length,{},node});
             padding(length);
         }
@@ -274,6 +301,18 @@ inline void packMemory(Bit7zLibrary const& lib,MemoryFs const& fs,fs::path const
         configure(writer,*fmt.outer,options);
         writer.addFile(input,"archive.tar");
         writer.compressTo(path8(output));
+    }else if(fmt.inner==&BitFormat::Tar) {
+        TarLayout tar(fs);
+        std::ofstream file(output,std::ios::binary|std::ios::trunc);
+        if(!file)throw std::runtime_error("Cannot create TAR archive");
+        std::vector<char> bytes(1024*1024);
+        for(uint64_t offset=0;offset<tar.size();) {
+            auto n=tar.read(offset,bytes.data(),bytes.size());
+            if(!n)throw std::runtime_error("Short TAR input");
+            file.write(bytes.data(),static_cast<std::streamsize>(n));offset+=n;
+            if(!file)throw std::runtime_error("Cannot write TAR archive");
+        }
+        file.close();if(!file)throw std::runtime_error("Cannot close TAR archive");
     }else if(original&&incrementalFormat(fmt)) {
         MemoryWriter writer(lib,*fmt.inner,fs,options,*original);
         writer.compressTo(path8(output));

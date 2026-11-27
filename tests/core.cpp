@@ -405,6 +405,23 @@ void memoryPressure(fs::path const& archive) {
     require(cacheFiles()==disk,"save under memory pressure creates no extracted cache");
     require(wz_memory_limit(512)==1,"restore cache limit");
 }
+void metadata(fs::path const& archive) {
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    require(read(root/L"script.sh")=="old","read POSIX executable");
+    HANDLE file=CreateFileW((root/L"script.sh").c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,OPEN_EXISTING,0,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"open original time");
+    FILETIME modified{};
+    require(GetFileTime(file,nullptr,nullptr,&modified)!=0,"get original time");
+    CloseHandle(file);
+    write(root/L"script.sh","new");
+    file=CreateFileW((root/L"script.sh").c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                    nullptr,OPEN_EXISTING,0,nullptr);
+    require(file!=INVALID_HANDLE_VALUE&&SetFileTime(file,nullptr,nullptr,&modified),"retain original modification time");
+    CloseHandle(file);
+    eject(drive);
+}
 void largeOffset(fs::path const& archive) {
     auto disk=cacheFiles();WzOptions o{};wz_default_options(&o);o.batch=1;
     auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
@@ -586,6 +603,8 @@ int wmain(int argc,wchar_t** argv) {
             randomAccess(root/L"random.tar",true);
             std::cout<<"Testing direct stored ZIP random access"<<std::endl;
             randomAccess(root/L"random-stored.zip",true);
+            std::cout<<"Testing POSIX TAR metadata retention"<<std::endl;
+            metadata(root/L"metadata.tar");metadata(root/L"metadata.tar.gz");
             std::cout<<"Testing 64-bit sparse offsets and memory mapped I/O"<<std::endl;
             fs::copy_file(root/L"ui.zip",root/L"large-offset.zip",fs::copy_options::overwrite_existing);
             largeOffset(root/L"large-offset.zip");

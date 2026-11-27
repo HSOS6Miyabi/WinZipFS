@@ -67,6 +67,16 @@ with ZipFile(root / "random-stored.zip", "w", compression=ZIP_STORED) as z:
         source = Pattern()
         while chunk := source.read(MIB):
             out.write(chunk)
+for name, mode in (("metadata.tar", "w"), ("metadata.tar.gz", "w:gz")):
+    with tarfile.open(root / name, mode, format=tarfile.PAX_FORMAT) as tar:
+        from io import BytesIO
+        info = tarfile.TarInfo("script.sh")
+        info.size = 3
+        info.mode = 0o751
+        info.uid, info.gid = 12345, 23456
+        info.uname, info.gname = "example-user", "example-group"
+        info.mtime = 1712345678.125
+        tar.addfile(info, BytesIO(b"old"))
 with tarfile.open(root / "special.tar", "w") as tar:
     info = tarfile.TarInfo("fifo")
     info.type = tarfile.FIFOTYPE
