@@ -21,18 +21,24 @@ template<class T> T identify(T value,std::wstring_view id) {
     AutomationProperties::SetAutomationId(value,hs(id));return value;
 }
 inline Button button(std::wstring_view title,std::wstring_view id) {
-    auto b=identify(Button{},id);b.Content(box_value(hs(title)));return b;
+    auto b=identify(Button{},id);
+    auto caption=text(title);caption.TextAlignment(TextAlignment::Center);
+    b.Content(caption);b.HorizontalAlignment(HorizontalAlignment::Stretch);
+    AutomationProperties::SetName(b,hs(title));return b;
 }
 inline TextBox number(std::wstring_view label,std::wstring_view id) {
-    auto b=identify(TextBox{},id);b.Header(box_value(hs(label)));b.MinWidth(145);return b;
+    auto b=identify(TextBox{},id);b.Header(text(label));b.MinWidth(145);
+    AutomationProperties::SetName(b,hs(label));return b;
 }
 inline ComboBox combo(std::wstring_view label,std::wstring_view id,std::initializer_list<const wchar_t*> items) {
-    auto b=identify(ComboBox{},id);b.Header(box_value(hs(label)));b.MinWidth(180);
+    auto b=identify(ComboBox{},id);b.Header(text(label));b.MinWidth(180);
+    b.HorizontalAlignment(HorizontalAlignment::Stretch);AutomationProperties::SetName(b,hs(label));
     for(auto item:items) b.Items().Append(box_value(hstring(item)));
     return b;
 }
 inline ToggleSwitch toggle(std::wstring_view title,std::wstring_view id) {
-    auto t=identify(ToggleSwitch{},id);t.Header(box_value(hs(title)));return t;
+    auto t=identify(ToggleSwitch{},id);t.Header(text(title));
+    AutomationProperties::SetName(t,hs(title));return t;
 }
 inline std::wstring coreError() {
     wchar_t b[512]{};wz_error(b,512);return *b?b:L"Operation failed";
@@ -50,7 +56,10 @@ class Dashboard {
     NOTIFYICONDATAW tray{};
     DispatcherTimer timer;
     ListView list{nullptr};
-    TextBlock summary{nullptr},details{nullptr},message{nullptr};
+    TextBlock summary{nullptr},details{nullptr},message{nullptr},heading{nullptr},description{nullptr};
+    Grid toolbar{nullptr};
+    std::vector<StackPanel> adaptiveGroups;
+    bool compact=false;
     ProgressRing progress{nullptr};
     Button mountBtn{nullptr},readOnlyBtn{nullptr},exportBtn{nullptr},discardBtn{nullptr},openBtn{nullptr},flushBtn{nullptr},ejectBtn{nullptr},applyBtn{nullptr},
            defaultsBtn{nullptr},saveDefaultsBtn{nullptr},registerBtn{nullptr},unregisterBtn{nullptr},
@@ -74,13 +83,43 @@ class Dashboard {
         explicit SecretText(std::wstring text):value(std::move(text)) {}
         ~SecretText(){if(!value.empty()) SecureZeroMemory(value.data(),value.size()*sizeof(wchar_t));}
     };
-    struct Job {std::function<std::wstring()> action;bool quiet=false,exit=false;std::function<void()> passwordRetry;};
+    struct Job {
+        std::function<std::wstring()> action;
+        bool quiet=false,exit=false;
+        std::function<void()> passwordRetry;
+        std::function<void()> completed;
+    };
     std::deque<Job> jobs;
     static constexpr UINT trayMessage=WM_APP+1;
     static constexpr int levels[]={0,1,3,5,7,9};
 
     static StackPanel vertical(double spacing=10) {StackPanel p;p.Spacing(spacing);return p;}
-    static StackPanel horizontal(double spacing=8) {StackPanel p;p.Orientation(Orientation::Horizontal);p.Spacing(spacing);return p;}
+    StackPanel horizontal(double spacing=8) {
+        StackPanel p;p.Orientation(Orientation::Horizontal);p.Spacing(spacing);
+        adaptiveGroups.push_back(p);return p;
+    }
+    void arrange(double width,double height) {
+        if(width<=0)return;
+        bool narrow=width<780;
+        compact=narrow;
+        for(auto const& group:adaptiveGroups)
+            group.Orientation(narrow?Orientation::Vertical:Orientation::Horizontal);
+        auto& grid=toolbar;
+        grid.ColumnDefinitions().Clear();grid.RowDefinitions().Clear();
+        int columns=narrow?2:4;
+        for(int i=0;i<columns;++i) {
+            ColumnDefinition col;col.Width(GridLength{1,GridUnitType::Star});grid.ColumnDefinitions().Append(col);
+        }
+        for(int i=0;i<(narrow?2:1);++i) {
+            RowDefinition row;row.Height(GridLength{1,GridUnitType::Auto});grid.RowDefinitions().Append(row);
+        }
+        for(uint32_t i=0;i<grid.Children().Size();++i) {
+            auto child=grid.Children().GetAt(i);
+            Grid::SetRow(child,int(i)/columns);Grid::SetColumn(child,int(i)%columns);
+        }
+        heading.FontSize(narrow?24:32);
+        description.Visibility(narrow||height<600?Visibility::Collapsed:Visibility::Visible);
+    }
     static Border card(UIElement const& content) {
         Border b;b.CornerRadius(CornerRadius{10,10,10,10});b.Padding(Thickness{18,16,18,16});
         try {
@@ -91,7 +130,9 @@ class Dashboard {
         }catch(...){}
         b.Child(content);return b;
     }
-    void say(std::wstring_view value) {message.Text(hs(value));}
+    void say(std::wstring_view value) {
+        message.Text(hs(value));ToolTipService::SetToolTip(message,box_value(hs(value)));
+    }
     WzVolume const* current() const {
         auto i=std::find_if(rows.begin(),rows.end(),[this](const auto& r){return selected==r.mount;});
         return i==rows.end()?nullptr:&*i;
@@ -174,7 +215,13 @@ class Dashboard {
             list.Items().Clear();
             int index=-1;
             for(size_t i=0;i<rows.size();++i) {
-                list.Items().Append(box_value(hs(rowText(rows[i]))));
+                auto item=ListViewItem{};
+                auto title=rowText(rows[i]);
+                auto caption=text(title);
+                item.Content(caption);item.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+                AutomationProperties::SetName(item,hs(title+L" · "+rows[i].archive));
+                ToolTipService::SetToolTip(item,box_value(hs(rows[i].archive)));
+                list.Items().Append(item);
                 if(previous==rows[i].mount) index=int(i);
             }
             if(index<0&&!rows.empty()) index=0;
@@ -218,12 +265,15 @@ class Dashboard {
             Application::Current().Exit();
             co_return;
         }
+        if(!failed&&job.completed)job.completed();
         refresh();
         if(requestPassword) job.passwordRetry();
         startNext();
     }
-    void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false,std::function<void()> retry={}) {
-        jobs.push_back({std::move(action),quiet,exit,std::move(retry)});startNext();
+    void queue(std::function<std::wstring()> action,bool quiet=false,bool exit=false,
+               std::function<void()> retry={},std::function<void()> completed={}) {
+        if(quitting)return;
+        jobs.push_back({std::move(action),quiet,exit,std::move(retry),std::move(completed)});startNext();
     }
     fire_and_forget promptPassword(std::wstring path,bool uncMode=false) {
         if(dialogOpen) co_return;
@@ -291,17 +341,23 @@ class Dashboard {
         try {
             auto path=shell::pick(hwnd);
             if(path.empty())return;
-            wchar_t result[32768]{};
-            if(!wz_unc_path(path.c_str(),result,32768)){say(L"Error: "+coreError());return;}
-            shell::clipboard(hwnd,result);
-            say(L"UNC path copied. Open it from any application while WinZipFS is running.");
+            auto owner=hwnd;
+            queue([path,owner]{
+                wchar_t result[WZ_MOUNT_CAPACITY]{};
+                if(!wz_unc_path(path.c_str(),result,WZ_MOUNT_CAPACITY))return L"Error: "+coreError();
+                shell::clipboard(owner,result);
+                return std::wstring(L"UNC path copied. Open it from any application while WinZipFS is running.");
+            });
         }catch(...){say(L"Error: Cannot copy the UNC path.");}
     }
     void applyUncSettings() {
         try {
             shell::UncSettings next{static_cast<unsigned>(checkedNumber(uncSeconds,0,86400)),preferUnc.IsOn()};
-            if(!wz_unc_start(&defaults,next.seconds)) {say(L"Error: "+coreError());refreshUncControls();return;}
-            shell::saveUncSettings(next);uncSettings=next;refreshUncControls();say(L"UNC settings saved.");
+            auto opt=defaults;
+            queue([opt,next]{
+                if(!wz_unc_start(&opt,next.seconds))return L"Error: "+coreError();
+                shell::saveUncSettings(next);return std::wstring(L"UNC settings saved.");
+            },false,false,{},[this,next]{uncSettings=next;refreshUncControls();});
         }catch(...){say(L"Error: Enter a cache time from 0 to 86400 seconds.");}
     }
     void exportCopy(std::wstring drive) {
@@ -419,9 +475,11 @@ class Dashboard {
         try {
             auto o=readOptions();
             if(o.method!=0) {say(L"Error: Default compression method must be Automatic.");return;}
-            shell::saveDefaults(o);defaults=o;
-            wz_unc_settings(&defaults,uncSettings.seconds);
-            say(L"Defaults saved for future mounts.");
+            auto seconds=uncSettings.seconds;
+            queue([o,seconds]{
+                if(!wz_unc_settings(&o,seconds))return L"Error: "+coreError();
+                shell::saveDefaults(o);return std::wstring(L"Defaults saved for future mounts.");
+            },false,false,{},[this,o]{defaults=o;});
         }catch(...){say(L"Error: Check numeric ranges and compression settings.");}
     }
     void selectDrive(std::wstring drive) {
@@ -460,9 +518,10 @@ class Dashboard {
             auto drive=std::wstring(r.mount);
             auto opt=r.options;bool readOnly=r.readOnly!=0;auto id=std::wstring(r.sessionId);
             HMENU sub=CreatePopupMenu();
-            add(sub,L"Open drive",[this,drive]{openDrive(drive);});
-            add(sub,L"Copy address",[this,drive]{try{shell::clipboard(hwnd,drive);say(L"Archive address copied.");}catch(...){say(L"Error: Cannot copy the archive address.");}});
-            add(sub,L"Compression and cache settings",[this,drive]{selectDrive(drive);});
+            auto active=[this,drive,id]{return sessionId(drive)==id;};
+            add(sub,L"Open drive",[this,drive,active]{if(active())openDrive(drive);});
+            add(sub,L"Copy address",[this,drive,active]{if(!active())return;try{shell::clipboard(hwnd,drive);say(L"Archive address copied.");}catch(...){say(L"Error: Cannot copy the archive address.");}});
+            add(sub,L"Compression and cache settings",[this,drive,active]{if(active())selectDrive(drive);});
             add(sub,L"Batch write mode",[this,drive,opt,id]() mutable {
                 opt.batch=!opt.batch;
                 queue([drive,opt,id]{
@@ -470,10 +529,10 @@ class Dashboard {
                     return wz_options(drive.c_str(),&opt)?L"Batch mode updated":L"Error: "+coreError();
                 });
             },MF_STRING|(opt.batch?MF_CHECKED:MF_UNCHECKED)|(readOnly?MF_GRAYED:0));
-            add(sub,L"Save changes",[this,drive]{save(drive,false);},MF_STRING|(readOnly?MF_GRAYED:0));
-            add(sub,L"Eject",[this,drive]{save(drive,true);});
-            add(sub,L"Save archive copy…",[this,drive]{exportCopy(drive);},MF_STRING|(r.protectedArchive?MF_GRAYED:0));
-            add(sub,L"Discard changes and eject…",[this,drive]{discard(drive);},MF_STRING|(!readOnly&&r.dirty?0:MF_GRAYED));
+            add(sub,L"Save changes",[this,drive,active]{if(active())save(drive,false);},MF_STRING|(readOnly?MF_GRAYED:0));
+            add(sub,L"Eject",[this,drive,active]{if(active())save(drive,true);});
+            add(sub,L"Save archive copy…",[this,drive,active]{if(active())exportCopy(drive);},MF_STRING|(r.protectedArchive?MF_GRAYED:0));
+            add(sub,L"Discard changes and eject…",[this,drive,active]{if(active())discard(drive);},MF_STRING|(!readOnly&&r.dirty?0:MF_GRAYED));
             auto title=(r.uncMode?std::wstring(L"UNC"):drive)+L"  "+std::filesystem::path(r.archive).filename().wstring();
             AppendMenuW(root,MF_POPUP,reinterpret_cast<UINT_PTR>(sub),title.c_str());
         }
@@ -499,6 +558,19 @@ class Dashboard {
     static LRESULT CALLBACK windowProc(HWND h,UINT msg,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR p) {
         auto self=reinterpret_cast<Dashboard*>(p);
         if(msg==WM_CLOSE&&!self->quitting) {self->hide();return 0;}
+        if(msg==WM_GETMINMAXINFO) {
+            auto result=DefSubclassProc(h,msg,w,l);
+            auto minmax=reinterpret_cast<MINMAXINFO*>(l);
+            UINT dpi=GetDpiForWindow(h);
+            int width=MulDiv(440,dpi,96),height=MulDiv(480,dpi,96);
+            MONITORINFO monitor{sizeof(monitor)};
+            if(GetMonitorInfoW(MonitorFromWindow(h,MONITOR_DEFAULTTONEAREST),&monitor)) {
+                width=std::min(width,monitor.rcWork.right-monitor.rcWork.left);
+                height=std::min(height,monitor.rcWork.bottom-monitor.rcWork.top);
+            }
+            minmax->ptMinTrackSize.x=width;minmax->ptMinTrackSize.y=height;
+            return result;
+        }
         return DefSubclassProc(h,msg,w,l);
     }
     static LRESULT CALLBACK controlProc(HWND h,UINT msg,WPARAM w,LPARAM l) {
@@ -537,20 +609,24 @@ class Dashboard {
         header.Padding(Thickness{28,22,28,12});header.MaxWidth(960);
         auto page=vertical(16);
         page.Padding(Thickness{28,4,28,28});page.MaxWidth(960);
-        header.Children().Append(text(L"Archive drives",32,true));
-        header.Children().Append(text(L"Mount compressed files as Windows drives, edit files in place, and save changes when you are ready."));
-        auto toolbar=horizontal();
+        heading=text(L"WinZipFS",32,true);header.Children().Append(heading);
+        description=text(L"Open archives as Windows drives or UNC paths. Read and edit files directly, with an in-memory cache.");
+        header.Children().Append(description);
+        toolbar=Grid{};toolbar.ColumnSpacing(8);toolbar.RowSpacing(8);
         mountBtn=button(L"Mount archive…",L"Mount");
         readOnlyBtn=button(L"Mount read-only…",L"MountReadOnly");
         hideBtn=button(L"Minimize to tray",L"Hide");hideBtn.IsEnabled(false);
         exitBtn=button(L"Exit",L"Exit");
         toolbar.Children().Append(mountBtn);toolbar.Children().Append(readOnlyBtn);toolbar.Children().Append(hideBtn);toolbar.Children().Append(exitBtn);
         header.Children().Append(toolbar);
-        auto activity=horizontal();
+        Grid activity;activity.ColumnSpacing(8);
+        ColumnDefinition iconColumn;iconColumn.Width(GridLength{24,GridUnitType::Pixel});
+        ColumnDefinition textColumn;textColumn.Width(GridLength{1,GridUnitType::Star});
+        activity.ColumnDefinitions().Append(iconColumn);activity.ColumnDefinitions().Append(textColumn);
         progress=identify(ProgressRing{},L"Progress");progress.Width(20);progress.Height(20);progress.IsActive(false);
         AutomationProperties::SetName(progress,L"Archive operation progress");
-        message=identify(text(L"Ready"),L"Status");
-        activity.Children().Append(progress);activity.Children().Append(message);header.Children().Append(activity);
+        message=identify(text(L"Ready"),L"Status");message.MaxLines(3);message.TextTrimming(TextTrimming::CharacterEllipsis);
+        Grid::SetColumn(message,1);activity.Children().Append(progress);activity.Children().Append(message);header.Children().Append(activity);
         auto volumes=vertical();
         volumes.Children().Append(text(L"Mounted archives",20,true));
         summary=identify(text(L"0 mounted"),L"Summary");volumes.Children().Append(summary);
@@ -633,9 +709,13 @@ class Dashboard {
         recoveryBtn=button(L"Recover archive files…",L"Recovery");integrations.Children().Append(recoveryBtn);
         page.Children().Append(card(integrations));
         auto scroll=identify(ScrollViewer{},L"DashboardScroll");scroll.Content(page);scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        scroll.HorizontalScrollMode(ScrollMode::Disabled);
         Grid::SetRow(header,0);layout.Children().Append(header);
-        Grid::SetRow(scroll,1);layout.Children().Append(scroll);window.Content(layout);
+        Grid::SetRow(scroll,1);layout.Children().Append(scroll);
+        arrange(900,850);
+        layout.SizeChanged([this](auto&&,SizeChangedEventArgs const& e){arrange(e.NewSize().Width,e.NewSize().Height);});
+        window.Content(layout);
         mountBtn.Click([this](auto&&,auto&&){browse();});
         readOnlyBtn.Click([this](auto&&,auto&&){browse(true);});
         uncBtn.Click([this](auto&&,auto&&){browse(false,true);});
@@ -645,8 +725,10 @@ class Dashboard {
         memoryApply.Click([this](auto&&,auto&&){
             try {
                 auto value=static_cast<unsigned>(checkedNumber(memoryMiB,16,65536));
-                if(!wz_memory_limit(value)){say(L"Error: "+coreError());return;}
-                shell::saveMemoryLimit(value);refresh();say(L"Memory limit saved.");
+                queue([value]{
+                    if(!wz_memory_limit(value))return L"Error: "+coreError();
+                    shell::saveMemoryLimit(value);return std::wstring(L"Memory limit saved.");
+                });
             }catch(...){say(L"Error: Enter a memory limit from 16 to 65536 MiB.");}
         });
         exportBtn.Click([this](auto&&,auto&&){exportCopy(selected);});

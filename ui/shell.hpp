@@ -67,7 +67,9 @@ inline WzOptions loadDefaults() {
     WzOptions o{};wz_default_options(&o);WzOptions saved{};DWORD size=sizeof(saved);
     if(RegGetValueW(HKEY_CURRENT_USER,registry,L"Options",RRF_RT_REG_BINARY,nullptr,&saved,&size)==ERROR_SUCCESS&&size==sizeof(saved)&&
        saved.delaySeconds>=1&&saved.delaySeconds<=3600&&saved.idleMinutes>=0&&saved.idleMinutes<=1440&&
-       saved.threads>=0&&saved.threads<=256&&saved.level>=0&&saved.level<=9) o=saved;
+       saved.threads>=0&&saved.threads<=256&&
+       (saved.level==0||saved.level==1||saved.level==3||saved.level==5||saved.level==7||saved.level==9)&&
+       saved.method==0&&(saved.batch==0||saved.batch==1)&&(saved.solid==0||saved.solid==1)) o=saved;
     return o;
 }
 inline void saveDefaults(WzOptions o) {
@@ -159,7 +161,7 @@ inline std::wstring pickSave(HWND owner,std::wstring const& suggested) {
     winrt::check_hresult(CoCreateInstance(CLSID_FileSaveDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(dialog.put())));
     FILEOPENDIALOGOPTIONS options{};
     winrt::check_hresult(dialog->GetOptions(&options));
-    winrt::check_hresult(dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_OVERWRITEPROMPT));
+    winrt::check_hresult(dialog->SetOptions((options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST)&~FOS_OVERWRITEPROMPT));
     COMDLG_FILTERSPEC filters[]={{L"ZIP archive",L"*.zip"},{L"7-Zip archive",L"*.7z"}};
     winrt::check_hresult(dialog->SetFileTypes(2,filters));
     winrt::check_hresult(dialog->SetDefaultExtension(L"zip"));

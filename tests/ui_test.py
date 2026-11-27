@@ -349,6 +349,47 @@ def test_startup():
     exit_application()
 
 
+def test_layout():
+    root = launch_archive(FIX / "ui.zip")
+    dpi = user32.GetDpiForWindow(main_hwnd)
+    work = win32api.GetMonitorInfo(win32api.MonitorFromWindow(main_hwnd, 2))["Work"]
+    original = win32gui.GetWindowRect(main_hwnd)
+    controls = ("Open", "Flush", "Eject", "CopyAddress", "SaveCopy", "Discard", "Recompress",
+                "Batch", "Delay", "Idle", "Level", "Method", "Threads", "Solid", "Apply",
+                "LoadDefaults", "SaveDefaults", "MemoryMiB", "MemoryApply", "MountUnc",
+                "MountUncReadOnly", "CopyUnc", "UncSeconds", "PreferUnc", "UncApply",
+                "Register", "Unregister", "DefaultApps", "Recovery")
+    for width in (470, 700, 900):
+        physical = min(round(width*dpi/96), work[2]-work[0])
+        height = min(round(720*dpi/96), work[3]-work[1])
+        win32gui.SetWindowPos(main_hwnd, 0, work[0], work[1], physical, height, 0x14)
+        time.sleep(0.7)
+        left, top, right, bottom = win32gui.GetWindowRect(main_hwnd)
+        for name in ("Mount", "MountReadOnly", "Hide", "Exit", "Status"):
+            r = ctl(name).rectangle()
+            assert r.width() > 0 and r.height() > 0 and r.left >= left and r.right <= right, (width, name, r)
+        scroll = ctl("DashboardScroll")
+        viewport = scroll.rectangle()
+        for name in controls:
+            control = ctl(name)
+            try:
+                control.iface_scroll_item.ScrollIntoView()
+            except Exception:
+                try:
+                    control.set_focus()
+                except Exception:
+                    pass
+            time.sleep(0.1)
+            r = ctl(name).rectangle()
+            assert r.width() > 0 and r.left >= viewport.left-2 and r.right <= viewport.right+2, (width, name, r, viewport)
+        window.capture_as_image().save(RESULTS / f"dashboard-{width}dip.png")
+    win32gui.SetWindowPos(main_hwnd, 0, original[0], original[1], original[2]-original[0], original[3]-original[1], 0x14)
+    time.sleep(0.5)
+    assert (root/"sample.txt").read_text()=="original"
+    eject_selected()
+    exit_application()
+
+
 def test_picker():
     choose_archive(FIX / "ui.zip")
     status_contains("Mounted")
@@ -717,6 +758,7 @@ def test_unc():
 
 SUITES = {
     "startup": test_startup,
+    "layout": test_layout,
     "unc": test_unc,
     "safety": test_safety,
     "password": test_password,
