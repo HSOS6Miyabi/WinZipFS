@@ -267,8 +267,7 @@ public:
     }
     NTSTATUS GetVolumeInfo(VolumeInfo* out) override {
         *out={};
-        auto capacity=memoryPool.capacity(),used=memoryPool.used();
-        out->TotalSize=capacity;out->FreeSize=readOnly||used>=capacity?0:capacity-used;
+        out->TotalSize=memoryPool.capacity();out->FreeSize=readOnly?0:memoryPool.writable();
         out->VolumeLabelLength=static_cast<UINT16>(std::min(label.size(),size_t(31))*sizeof(wchar_t));
         memcpy(out->VolumeLabel,label.data(),out->VolumeLabelLength);
         return STATUS_SUCCESS;

@@ -165,8 +165,7 @@ class UncFs final : public Fsp::FileSystemBase {
     }
     NTSTATUS GetVolumeInfo(VolumeInfo* info) override {
         auto result=shadow.GetVolumeInfo(info);
-        auto capacity=memoryPool.capacity(),used=memoryPool.used();
-        if(NT_SUCCESS(result))info->FreeSize=used>=capacity?0:capacity-used;
+        if(NT_SUCCESS(result))info->FreeSize=memoryPool.writable();
         return result;
     }
     NTSTATUS GetSecurityByName(PWSTR name,PUINT32 attr,PSECURITY_DESCRIPTOR sd,SIZE_T* size) override {

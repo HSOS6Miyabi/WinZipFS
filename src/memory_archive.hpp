@@ -41,6 +41,7 @@ class MemoryPool {
     std::list<Record> lru;
     std::map<CacheKey,std::list<Record>::iterator> index;
     std::atomic<uint64_t> limit{512*MiB};
+    static constexpr uint64_t DecodeReserve=2*WindowSize;
     bool evict() {
         for(auto it=lru.end();it!=lru.begin();) {
             --it;
@@ -52,9 +53,14 @@ class MemoryPool {
 public:
     uint64_t capacity() const noexcept {return limit.load();}
     uint64_t used() const noexcept {return cleanBytes.load()+dirtyBytes.load();}
+    uint64_t writable() const noexcept {
+        auto cap=capacity(),dirty=dirtyBytes.load();
+        return cap>DecodeReserve&&dirty<cap-DecodeReserve?cap-DecodeReserve-dirty:0;
+    }
     void setLimit(uint64_t bytes) {
         if(bytes<16*MiB||bytes>64*1024*MiB)throw std::runtime_error("Memory limit must be 16–65536 MiB");
         std::lock_guard lock(mutex);
+        if(dirtyBytes.load()>bytes-DecodeReserve)throw MemoryFull();
         while(used()>bytes&&evict()){}
         if(used()>bytes)throw MemoryFull();
         limit=bytes;
@@ -62,7 +68,7 @@ public:
     PagePtr allocate(size_t size,bool modified) {
         std::lock_guard lock(mutex);
         auto cap=limit.load();
-        if(size>cap)throw MemoryFull();
+        if(size>cap||(modified&&size>writable()))throw MemoryFull();
         while(used()>cap-size&&evict()){}
         if(used()>cap-size)throw MemoryFull();
         try{return std::make_shared<Page>(size,modified);}

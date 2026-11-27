@@ -365,6 +365,50 @@ void randomAccess(fs::path const& archive,bool direct) {
     CloseHandle(h);eject(drive);
     require(wz_memory_limit(512)==1,"restore cache limit");
 }
+void memoryPressure(fs::path const& archive) {
+    constexpr uint64_t MiB=1024ull*1024;
+    auto disk=cacheFiles();
+    require(wz_memory_limit(16)==1,"limit before memory pressure");
+    WzOptions o{};wz_default_options(&o);o.batch=1;
+    auto drive=mount(archive,o);auto root=fs::path(drive+L"\\");
+    HANDLE file=CreateFileW((root/L"large.bin").c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,OPEN_EXISTING,FILE_FLAG_WRITE_THROUGH,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"open compressed file under memory pressure");
+    LARGE_INTEGER offset{};offset.QuadPart=20*MiB+99;
+    require(SetFilePointerEx(file,offset,nullptr,FILE_BEGIN)!=0,"seek compressed file");
+    DWORD written=0;char patch='Q';
+    require(WriteFile(file,&patch,1,&written,nullptr)&&written==1,"dirty partial compressed page");
+    CloseHandle(file);
+    file=CreateFileW((root/L"pressure.bin").c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_FLAG_WRITE_THROUGH,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"open pressure file");
+    std::vector<char> block(256*1024,'P');
+    uint64_t size=0;bool exhausted=false;
+    for(unsigned i=0;i<64;++i) {
+        written=0;
+        if(!WriteFile(file,block.data(),static_cast<DWORD>(block.size()),&written,nullptr)) {
+            require(GetLastError()==ERROR_DISK_FULL||GetLastError()==ERROR_HANDLE_DISK_FULL,"memory limit reports capacity");
+            exhausted=true;break;
+        }
+        require(written==block.size(),"complete pressure page");
+        size+=written;
+    }
+    CloseHandle(file);waitClosed(drive);
+    require(exhausted&&size>0,"dirty write budget enforced");
+    WzMemoryStats stats{};wz_memory_stats(&stats);
+    require(stats.dirtyBytes<=8*MiB&&stats.cleanBytes+stats.dirtyBytes<=stats.limitBytes,"decoder reserve retained");
+    require(cacheFiles()==disk,"memory pressure never spills to disk");
+    require(wz_flush(drive.c_str())==1,"save dirty archive after write budget exhaustion");
+    eject(drive);
+    drive=mount(archive,o);root=fs::path(drive+L"\\");
+    require(fs::file_size(root/L"pressure.bin")==size,"all accepted writes persisted");
+    file=CreateFileW((root/L"large.bin").c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                     nullptr,OPEN_EXISTING,0,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"reopen after pressure save");
+    require(rangeRead(file,20*MiB+99,1)=="Q","partial compressed edit persisted");
+    CloseHandle(file);eject(drive);
+    require(cacheFiles()==disk,"save under memory pressure creates no extracted cache");
+    require(wz_memory_limit(512)==1,"restore cache limit");
+}
 void uncMode(fs::path const& fixtures) {
     std::wcout<<L"Testing UNC on-demand namespace"<<std::endl;
     auto first=fixtures/L"unc first.zip",second=fixtures/L"unc second.7z";
@@ -490,6 +534,8 @@ int wmain(int argc,wchar_t** argv) {
             incremental(root/L"incremental.zip");
             std::cout<<"Testing bounded random ZIP reads and writes"<<std::endl;
             randomAccess(root/L"random.zip",false);
+            std::cout<<"Testing memory pressure and reserved writeback capacity"<<std::endl;
+            memoryPressure(root/L"random.zip");
             std::cout<<"Testing direct TAR random access"<<std::endl;
             randomAccess(root/L"random.tar",true);
             std::cout<<"Testing direct stored ZIP random access"<<std::endl;
