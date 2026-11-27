@@ -12,6 +12,7 @@
 #include <istream>
 #include <limits>
 #include <cstring>
+#include <cstdio>
 
 namespace wz {
 constexpr uint64_t MiB=1024ull*1024;
@@ -143,6 +144,36 @@ public:
     RangeStream(uint64_t size,std::function<size_t(uint64_t,void*,size_t)> read)
         :std::istream(nullptr),buffer(size,std::move(read)) {rdbuf(&buffer);}
 };
+
+// 7-Zip accepts an empty TAR by filename, but its unnamed stream interface
+// requires at least one header. Expose an empty root directory virtually.
+inline std::unique_ptr<RangeStream> tarInput(uint64_t size,
+    std::function<size_t(uint64_t,void*,size_t)> read) {
+    std::array<unsigned char,1024> probe{};
+    if(size>=1024&&size%512==0&&read(0,probe.data(),probe.size())==probe.size()&&
+       std::all_of(probe.begin(),probe.end(),[](auto ch){return ch==0;})) {
+        for(uint64_t off=1024;off<size;) {
+            auto n=static_cast<size_t>(std::min<uint64_t>(probe.size(),size-off));
+            if(read(off,probe.data(),n)!=n||
+               !std::all_of(probe.begin(),probe.begin()+n,[](auto ch){return ch==0;}))
+                throw std::runtime_error("Invalid empty TAR");
+            off+=n;
+        }
+        auto bytes=std::make_shared<std::array<unsigned char,1536>>();
+        auto h=bytes->data();
+        memcpy(h,"./",2);
+        memcpy(h+100,"0000755",7);memcpy(h+108,"0000000",7);memcpy(h+116,"0000000",7);
+        memcpy(h+124,"00000000000",11);memcpy(h+136,"00000000000",11);
+        memset(h+148,' ',8);h[156]='5';memcpy(h+257,"ustar",5);h[263]='0';h[264]='0';
+        unsigned sum=0;for(size_t i=0;i<512;++i)sum+=h[i];
+        char check[8]{};std::snprintf(check,sizeof(check),"%06o",sum);
+        memcpy(h+148,check,6);h[154]=0;h[155]=' ';
+        return std::make_unique<RangeStream>(bytes->size(),[bytes](uint64_t off,void* out,size_t n) {
+            memcpy(out,bytes->data()+static_cast<size_t>(off),n);return n;
+        });
+    }
+    return std::make_unique<RangeStream>(size,std::move(read));
+}
 
 class DiskInput {
     HANDLE file=INVALID_HANDLE_VALUE;
@@ -325,9 +356,9 @@ public:
         if(multi)source->reader_=std::make_unique<SeekableReader>(lib,path,*format,password);
         else {
             auto file=source->file;
-            source->input=std::make_unique<RangeStream>(file->size(),[file](uint64_t off,void* data,size_t n){
-                return file->read(off,data,n);
-            });
+            auto read=[file](uint64_t off,void* data,size_t n){return file->read(off,data,n);};
+            if(*format==BitFormat::Tar)source->input=tarInput(file->size(),read);
+            else source->input=std::make_unique<RangeStream>(file->size(),read);
             source->reader_=std::make_unique<SeekableReader>(lib,*source->input,*format,password);
         }
         return source;
@@ -338,7 +369,7 @@ public:
         auto source=std::make_shared<ArchiveSource>();
         source->parent=outer;
         auto size=outer->itemSize(0);
-        source->input=std::make_unique<RangeStream>(size,[outer](uint64_t off,void* data,size_t n){
+        source->input=tarInput(size,[outer](uint64_t off,void* data,size_t n){
             return outer->read(0,off,data,n);
         });
         source->reader_=std::make_unique<SeekableReader>(lib,*source->input,BitFormat::Tar,std::string{});
